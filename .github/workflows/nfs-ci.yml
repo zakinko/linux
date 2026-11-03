@@ -48,5 +48,10 @@ jobs:
               --rwdir /tmp --exec "sh $t" 2>&1 | tee /tmp/$(basename $t).log
             echo "::endgroup::"
           done
-          ! grep -h '^FAIL' /tmp/test-*.sh.log
-          grep -h '^PASS' /tmp/test-*.sh.log
+          # "! grep" would not trip bash -e; fail explicitly.
+          if grep -h 'FAIL:' /tmp/test-*.sh.log; then
+            exit 1
+          fi
+          for t in .github/ci/test-*.sh; do
+            grep -q 'PASS:' /tmp/$(basename $t).log || { echo "no result: $t"; exit 1; }
+          done

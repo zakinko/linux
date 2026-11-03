@@ -33,9 +33,9 @@ case $V in
 3)	root=$B ;;
 *)	root= ;;
 esac
-mount -t nfs -o vers=$V 127.0.0.1:$root/srv $B/a || { echo "FAIL: mount a"; exit 1; }
+mount -t nfs -o vers=$V,nolock 127.0.0.1:$root/srv $B/a || { echo "FAIL: mount a"; exit 1; }
 exportfs -o $opts,fsid=2 127.0.0.1:$B/a
-mount -t nfs -o vers=$V 127.0.0.1:$root/a $B/b || { echo "FAIL: mount b"; exit 1; }
+mount -t nfs -o vers=$V,nolock 127.0.0.1:$root/a $B/b || { echo "FAIL: mount b"; exit 1; }
 echo "NFS version $V"
 
 check() {
