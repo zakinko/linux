@@ -28,9 +28,15 @@ exportfs -o $opts,fsid=1 127.0.0.1:$B/srv
 rpc.mountd
 rpc.nfsd 4
 exportfs -v
-mount -t nfs -o vers=4.2 127.0.0.1:/srv $B/a || { echo "FAIL: mount a"; exit 1; }
+V=${V:-4.2}
+case $V in
+3)	root=$B ;;
+*)	root= ;;
+esac
+mount -t nfs -o vers=$V 127.0.0.1:$root/srv $B/a || { echo "FAIL: mount a"; exit 1; }
 exportfs -o $opts,fsid=2 127.0.0.1:$B/a
-mount -t nfs -o vers=4.2 127.0.0.1:/a $B/b || { echo "FAIL: mount b"; exit 1; }
+mount -t nfs -o vers=$V 127.0.0.1:$root/a $B/b || { echo "FAIL: mount b"; exit 1; }
+echo "NFS version $V"
 
 check() {
 	path=$1 kind=$2 want=$3
@@ -41,9 +47,9 @@ check() {
 	fi
 	got=$(stat -c %a $B/srv/${path#$B/?/})
 	if [ "$got" = "$want" ]; then
-		echo "PASS: $path $kind mode $got"
+		echo "PASS: v$V $path $kind mode $got"
 	else
-		echo "FAIL: $path $kind mode $got, want $want"
+		echo "FAIL: v$V $path $kind mode $got, want $want"
 	fi
 }
 
@@ -54,5 +60,6 @@ for via in a b; do
 	check $B/$via/plain/d.$via dir 700
 done
 
+exportfs -u 127.0.0.1:$B/a
 umount $B/b
 umount $B/a
