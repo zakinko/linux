@@ -1,0 +1,52 @@
+name: nfs-ci
+
+on:
+  push:
+    branches-ignore: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy --no-install-recommends \
+            build-essential bc bison flex libelf-dev libssl-dev dwarves \
+            python3-pip qemu-system-x86 nfs-kernel-server acl rdma-core ibverbs-utils
+          sudo pip3 install --break-system-packages virtme-ng
+          sudo chmod 666 /dev/kvm
+
+      - name: Configure
+        run: |
+          vng --kconfig $(sed -e '/^#/d' -e '/^$/d' -e 's/^/--configitem /' .github/ci/kconfig)
+          make -s olddefconfig
+          missing=0
+          for item in $(grep -v '^#' .github/ci/kconfig); do
+            grep -qx "$item" .config || { echo "not set: $item"; missing=1; }
+          done
+          exit $missing
+
+      - name: Build
+        run: make -s -j$(nproc) bzImage modules
+
+      - name: Test
+        run: |
+          for t in .github/ci/test-*.sh; do
+            echo "::group::$t"
+            vng --run . --user root --cpus 4 --memory 4G \
+              --rwdir /tmp --exec "sh $t" 2>&1 | tee /tmp/$(basename $t).log
+            echo "::endgroup::"
+          done
+          ! grep -h '^FAIL' /tmp/test-*.sh.log
+          grep -h '^PASS' /tmp/test-*.sh.log
