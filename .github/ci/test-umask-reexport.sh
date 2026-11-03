@@ -20,14 +20,17 @@ mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs
 mount -t nfsd nfsd /proc/fs/nfsd
 rpcbind -w 2>/dev/null || true
 
+# The guest's / is virtiofs, which cannot be exported, so make $B the NFSv4
+# root rather than letting mountd build a pseudo root from /.
 opts=rw,sync,no_root_squash,no_subtree_check
+exportfs -o $opts,fsid=0,crossmnt 127.0.0.1:$B
 exportfs -o $opts,fsid=1 127.0.0.1:$B/srv
 rpc.mountd
 rpc.nfsd 4
 exportfs -v
-mount -t nfs -o vers=4.2 127.0.0.1:$B/srv $B/a || { echo "FAIL: mount a"; exit 1; }
+mount -t nfs -o vers=4.2 127.0.0.1:/srv $B/a || { echo "FAIL: mount a"; exit 1; }
 exportfs -o $opts,fsid=2 127.0.0.1:$B/a
-mount -t nfs -o vers=4.2 127.0.0.1:$B/a $B/b || { echo "FAIL: mount b"; exit 1; }
+mount -t nfs -o vers=4.2 127.0.0.1:/a $B/b || { echo "FAIL: mount b"; exit 1; }
 
 check() {
 	path=$1 kind=$2 want=$3
