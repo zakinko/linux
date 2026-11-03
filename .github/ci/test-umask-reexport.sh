@@ -15,6 +15,7 @@ setfacl -d -m u::rwx,g::rwx,o::rwx $B/srv/acl
 
 mount -t tmpfs tmpfs /var/lib/nfs
 mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery
+touch /var/lib/nfs/etab /var/lib/nfs/rmtab
 mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs
 mount -t nfsd nfsd /proc/fs/nfsd
 rpcbind -w 2>/dev/null || true
@@ -23,6 +24,7 @@ opts=rw,sync,no_root_squash,no_subtree_check
 exportfs -o $opts,fsid=1 127.0.0.1:$B/srv
 rpc.mountd
 rpc.nfsd 4
+exportfs -v
 mount -t nfs -o vers=4.2 127.0.0.1:$B/srv $B/a || { echo "FAIL: mount a"; exit 1; }
 exportfs -o $opts,fsid=2 127.0.0.1:$B/a
 mount -t nfs -o vers=4.2 127.0.0.1:$B/a $B/b || { echo "FAIL: mount b"; exit 1; }
