@@ -77,6 +77,12 @@ spc = struct.pack('>I', 1) + ace(0, 0x40, 7, 'EVERYONE@')
 os.setxattr(B + 'g', 'system.nfs4_acl', spc)
 ok('group flag dropped from EVERYONE@',
    rd(A + 'g', 'system.nfs4_acl') == struct.pack('>I', 1) + ace(0, 0, 7, 'EVERYONE@'))
+L = sys.argv[1] + '/srv/l'
+open(L, 'w').close()
+os.setxattr(L, D, val(2, [ace(0, 0, 7, '1234'), ace(0, 0, 7, 'alice@nowhere')]))
+ok('local dacl set and read through the VFS, no handler',
+   rd(L, D) == val(2, [ace(0, 0, 7, '1234'), ace(0, 0, 7, 'alice@nowhere')]))
+ok('local malformed value refused', refused(L, D, b'\0\0\0\0\0\0\0\5'))
 inh = struct.pack('>I', 1) + ace(0, 0x80, 7, '1234')
 ok('INHERITED refused in the acl attribute', refused(B + 'g', 'system.nfs4_acl', inh))
 PY
