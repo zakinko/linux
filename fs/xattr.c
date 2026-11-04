@@ -357,6 +357,67 @@ retry_deleg:
 }
 EXPORT_SYMBOL_GPL(vfs_setxattr);
 
+/**
+ * vfs_get_nfs4_acl - get the NFSv4 ACL of an inode
+ * @dentry: the dentry of the inode
+ *
+ * The ACL is the one system.nfs4_acl presents, so LSMs are asked about that
+ * attribute.  The caller must kfree() the result.
+ *
+ * Return: the ACL, or an ERR_PTR.
+ */
+struct nfs4_acl *vfs_get_nfs4_acl(struct dentry *dentry)
+{
+	struct inode *inode = d_inode(dentry);
+	int error;
+
+	if (!IS_NFS4ACL(inode))
+		return ERR_PTR(-EOPNOTSUPP);
+	error = security_inode_getxattr(dentry, XATTR_NAME_NFSV4_ACL);
+	if (error)
+		return ERR_PTR(error);
+	return inode->i_op->get_nfs4_acl(dentry);
+}
+EXPORT_SYMBOL_GPL(vfs_get_nfs4_acl);
+
+/**
+ * vfs_set_nfs4_acl_locked - set the NFSv4 ACL of an inode
+ * @idmap: idmap of the mount
+ * @dentry: the dentry of the inode
+ * @acl: the ACL to set
+ *
+ * The caller holds the inode lock.  Who may set the ACL is the filesystem's
+ * decision: the ACL itself can grant it to someone other than the owner.
+ *
+ * Return: 0 or a negative errno.
+ */
+int vfs_set_nfs4_acl_locked(const struct mnt_idmap *idmap,
+			    struct dentry *dentry, const struct nfs4_acl *acl)
+{
+	struct inode *inode = d_inode(dentry);
+	int error;
+
+	if (!IS_NFS4ACL(inode))
+		return -EOPNOTSUPP;
+	/* The ids in @acl are not translated. */
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	error = may_write_xattr(idmap, inode);
+	if (error)
+		return error;
+	error = security_inode_setxattr(idmap, dentry, XATTR_NAME_NFSV4_ACL,
+					NULL, 0, 0);
+	if (error)
+		return error;
+	error = inode->i_op->set_nfs4_acl(dentry, acl);
+	if (error)
+		return error;
+	fsnotify_xattr(dentry);
+	security_inode_post_setxattr(dentry, XATTR_NAME_NFSV4_ACL, NULL, 0, 0);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vfs_set_nfs4_acl_locked);
+
 static ssize_t
 xattr_getsecurity(const struct mnt_idmap *idmap, struct inode *inode,
 		  const char *name, void *value, size_t size)
