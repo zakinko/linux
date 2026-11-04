@@ -40,7 +40,6 @@
 
 #include "nfsfh.h"
 #include "nfsd.h"
-#include "nfserr.h"
 #include <linux/xattr.h>
 
 #include "acl.h"
