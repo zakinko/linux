@@ -21,7 +21,11 @@ opts=rw,sync,no_root_squash,insecure,no_subtree_check
 exportfs -o $opts,fsid=0,crossmnt 127.0.0.1:$B
 exportfs -o $opts,fsid=1 127.0.0.1:$B/srv
 rpc.mountd
+# A fresh server is in grace for a lease, and pynfs takes the errors as failures.
+echo 10 > /proc/fs/nfsd/nfsv4leasetime
+echo 10 > /proc/fs/nfsd/nfsv4gracetime
 rpc.nfsd 8
+sleep 15
 
 for v in 4.0 4.1; do
 	cd $P/nfs$v || continue

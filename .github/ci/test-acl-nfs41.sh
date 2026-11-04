@@ -9,7 +9,7 @@ mkdir -p $B
 mount -t tmpfs tmpfs $B
 mkdir $B/a $B/b $B/srv
 echo 1 > /sys/module/kernel/parameters/shmem_nfs4acl
-mount -t tmpfs -o noacl,mode=0777 tmpfs $B/srv
+mount -t tmpfs -o mode=0777 tmpfs $B/srv
 echo 0 > /sys/module/kernel/parameters/shmem_nfs4acl
 : > $B/srv/f
 : > $B/srv/g
