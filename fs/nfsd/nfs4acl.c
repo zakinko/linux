@@ -41,6 +41,8 @@
 #include "nfsfh.h"
 #include "nfsd.h"
 #include "nfserr.h"
+#include <linux/xattr.h>
+
 #include "acl.h"
 #include "vfs.h"
 
@@ -135,6 +137,15 @@ nfsd4_get_nfs4_acl(struct svc_rqst *rqstp, struct dentry *dentry,
 	struct posix_acl *pacl = NULL, *dpacl = NULL;
 	unsigned int flags = 0;
 	int size = 0;
+
+	if (IS_NFS4ACL(inode)) {
+		struct nfs4_acl *nacl = vfs_get_nfs4_acl(dentry, NFS4ACL_ACL);
+
+		if (IS_ERR(nacl))
+			return PTR_ERR(nacl);
+		*acl = nacl;
+		return 0;
+	}
 
 	pacl = get_inode_acl(inode, ACL_TYPE_ACCESS);
 	if (!pacl)
@@ -783,14 +794,28 @@ out_estate:
 	return ret;
 }
 
-__be32 nfsd4_acl_to_attr(enum nfs_ftype4 type, struct nfs4_acl *acl,
-			 struct nfsd_attrs *attr)
+__be32 nfsd4_acl_to_attr(struct inode *inode, enum nfs_ftype4 type,
+			 struct nfs4_acl *acl, struct nfsd_attrs *attr)
 {
 	int host_error;
 	unsigned int flags = 0;
+	u32 i;
 
 	if (!acl)
 		return nfs_ok;
+
+	if (IS_NFS4ACL(inode)) {
+		/* RFC 8881 6.4.3.2: always clear in the acl attribute. */
+		for (i = 0; i < acl->naces; i++)
+			if (acl->aces[i].flag & NFS4_ACE_INHERITED_ACE)
+				return nfserr_inval;
+		attr->na_acl = acl;
+		return nfs_ok;
+	}
+
+	for (i = 0; i < acl->naces; i++)
+		if (acl->aces[i].whotype == NFS4_ACL_WHO_STRING)
+			return nfserr_badowner;
 
 	if (type == NF4DIR)
 		flags = NFS4_ACL_DIR;
@@ -801,6 +826,38 @@ __be32 nfsd4_acl_to_attr(enum nfs_ftype4 type, struct nfs4_acl *acl,
 		return nfserr_attrnotsupp;
 	else
 		return nfserrno(host_error);
+}
+
+static __be32 nfsd4_check_acl41(const struct nfs4_acl *acl, u32 type0, u32 type1)
+{
+	u32 i;
+
+	/* RFC 8881 6.4.3.2 */
+	if (acl->flag & ~NFS4_ACL_FLAGS)
+		return nfserr_inval;
+	/* RFC 8881 6.2.1.1 */
+	for (i = 0; i < acl->naces; i++)
+		if (acl->aces[i].type != type0 && acl->aces[i].type != type1)
+			return nfserr_attrnotsupp;
+	return nfs_ok;
+}
+
+__be32 nfsd4_acl41_to_attr(struct nfs4_acl *dacl, struct nfs4_acl *sacl,
+			   struct nfsd_attrs *attr)
+{
+	__be32 status = nfs_ok;
+
+	if (dacl)
+		status = nfsd4_check_acl41(dacl, NFS4_ACE_ACCESS_ALLOWED_ACE_TYPE,
+					   NFS4_ACE_ACCESS_DENIED_ACE_TYPE);
+	if (sacl && status == nfs_ok)
+		status = nfsd4_check_acl41(sacl, NFS4_ACE_SYSTEM_AUDIT_ACE_TYPE,
+					   NFS4_ACE_SYSTEM_ALARM_ACE_TYPE);
+	if (status == nfs_ok) {
+		attr->na_dacl = dacl;
+		attr->na_sacl = sacl;
+	}
+	return status;
 }
 
 static short
