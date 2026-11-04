@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/xattr.h>
+#include <linux/nfs4.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/security.h>
@@ -356,6 +357,115 @@ retry_deleg:
 	return error;
 }
 EXPORT_SYMBOL_GPL(vfs_setxattr);
+
+static const char *nfs4_acl_xattr_name(struct inode *inode,
+				       enum nfs4_acl_type type)
+{
+	if (!IS_NFS4ACL(inode))
+		return NULL;
+	switch (type) {
+	case NFS4ACL_ACL:
+		return XATTR_NAME_NFSV4_ACL;
+	case NFS4ACL_DACL:
+		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_DACL : NULL;
+	case NFS4ACL_SACL:
+		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_SACL : NULL;
+	default:
+		return NULL;
+	}
+}
+
+/**
+ * vfs_get_nfs4_acl - get an NFSv4 ACL of an inode
+ * @idmap: idmap of the mount
+ * @dentry: the dentry of the inode
+ * @type: acl, dacl or sacl
+ *
+ * The ACL is the one system.nfs4_acl presents, so LSMs are asked about that
+ * attribute.  As with vfs_get_acl(), the ids are the filesystem's, and a
+ * caller on an idmapped mount maps them with make_vfsuid() and
+ * make_vfsgid().  The caller must kfree() the result.
+ *
+ * Return: the ACL, or an ERR_PTR.
+ */
+struct nfs4_acl *vfs_get_nfs4_acl(const struct mnt_idmap *idmap,
+				  struct dentry *dentry,
+				  enum nfs4_acl_type type)
+{
+	struct inode *inode = d_inode(dentry);
+	const char *name = nfs4_acl_xattr_name(inode, type);
+	int error;
+
+	if (!name)
+		return ERR_PTR(-EOPNOTSUPP);
+	error = security_inode_getxattr(dentry, name);
+	if (error)
+		return ERR_PTR(error);
+	return inode->i_op->get_nfs4_acl(idmap, dentry, type);
+}
+EXPORT_SYMBOL_GPL(vfs_get_nfs4_acl);
+
+/*
+ * Translate the ids of @acl from the mount's idmapping into the filesystem's,
+ * as vfs_set_acl_idmapped_mnt() does for POSIX ACLs.
+ */
+static void vfs_set_nfs4_acl_idmapped_mnt(const struct mnt_idmap *idmap,
+					  struct user_namespace *fs_userns,
+					  struct nfs4_acl *acl)
+{
+	for (u32 i = 0; i < acl->naces; i++) {
+		struct nfs4_ace *ace = &acl->aces[i];
+
+		if (ace->whotype != NFS4_ACL_WHO_NAMED)
+			continue;
+		if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
+			ace->who_gid = from_vfsgid(idmap, fs_userns,
+						   VFSGIDT_INIT(ace->who_gid));
+		else
+			ace->who_uid = from_vfsuid(idmap, fs_userns,
+						   VFSUIDT_INIT(ace->who_uid));
+	}
+}
+
+/**
+ * vfs_set_nfs4_acl_locked - set an NFSv4 ACL of an inode
+ * @idmap: idmap of the mount
+ * @dentry: the dentry of the inode
+ * @type: acl, dacl or sacl
+ * @acl: the ACL to set, with ids as seen through @idmap
+ *
+ * The ids of @acl are translated in place into the filesystem's, as
+ * vfs_set_acl() does.  The caller holds the inode lock.  Who may set the ACL
+ * is the filesystem's decision: the ACL itself can grant it to someone other
+ * than the owner.
+ *
+ * Return: 0 or a negative errno.
+ */
+int vfs_set_nfs4_acl_locked(const struct mnt_idmap *idmap,
+			    struct dentry *dentry, enum nfs4_acl_type type,
+			    struct nfs4_acl *acl)
+{
+	struct inode *inode = d_inode(dentry);
+	const char *name = nfs4_acl_xattr_name(inode, type);
+	int error;
+
+	if (!name)
+		return -EOPNOTSUPP;
+	error = may_write_xattr(idmap, inode);
+	if (error)
+		return error;
+	error = security_inode_setxattr(idmap, dentry, name, NULL, 0, 0);
+	if (error)
+		return error;
+	vfs_set_nfs4_acl_idmapped_mnt(idmap, i_user_ns(inode), acl);
+	error = inode->i_op->set_nfs4_acl(idmap, dentry, type, acl);
+	if (error)
+		return error;
+	fsnotify_xattr(dentry);
+	security_inode_post_setxattr(dentry, name, NULL, 0, 0);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vfs_set_nfs4_acl_locked);
 
 static ssize_t
 xattr_getsecurity(const struct mnt_idmap *idmap, struct inode *inode,

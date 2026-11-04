@@ -52,6 +52,8 @@
 #include <uapi/linux/fs.h>
 
 struct bdi_writeback;
+enum nfs4_acl_type;
+struct nfs4_acl;
 struct bio;
 struct io_comp_batch;
 struct fiemap_extent_info;
@@ -2036,6 +2038,10 @@ struct inode_operations {
 				     int);
 	int (*set_acl)(const struct mnt_idmap *, struct dentry *,
 		       struct posix_acl *, int);
+	struct nfs4_acl *(*get_nfs4_acl)(const struct mnt_idmap *,
+					 struct dentry *, enum nfs4_acl_type);
+	int (*set_nfs4_acl)(const struct mnt_idmap *, struct dentry *,
+			    enum nfs4_acl_type, const struct nfs4_acl *);
 	int (*fileattr_set)(const struct mnt_idmap *idmap,
 			    struct dentry *dentry, struct file_kattr *fa);
 	int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
@@ -2156,6 +2162,15 @@ extern loff_t vfs_dedupe_file_range_one(struct file *src_file, loff_t src_pos,
 #else
 #define IS_POSIXACL(inode)	0
 #endif
+
+/*
+ * The flag says the filesystem can, the operation says this inode can: an
+ * NFSv4 symlink has neither ACL nor operation.
+ */
+#define IS_NFS4ACL(inode)	(((inode)->i_sb->s_iflags & SB_I_NFS4ACL) && \
+				 (inode)->i_op->get_nfs4_acl)
+#define IS_NFS41ACL(inode)	(IS_NFS4ACL(inode) && \
+				 ((inode)->i_sb->s_iflags & SB_I_NFS41ACL))
 
 #define IS_DEADDIR(inode)	((inode)->i_flags & S_DEAD)
 #define IS_NOCMTIME(inode)	((inode)->i_flags & S_NOCMTIME)
