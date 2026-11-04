@@ -41,6 +41,8 @@
 #include "nfsfh.h"
 #include "nfsd.h"
 #include "nfserr.h"
+#include <linux/xattr.h>
+
 #include "acl.h"
 #include "vfs.h"
 
@@ -135,6 +137,15 @@ nfsd4_get_nfs4_acl(struct svc_rqst *rqstp, struct dentry *dentry,
 	struct posix_acl *pacl = NULL, *dpacl = NULL;
 	unsigned int flags = 0;
 	int size = 0;
+
+	if (IS_NFS4ACL(inode)) {
+		struct nfs4_acl *nacl = vfs_get_nfs4_acl(dentry);
+
+		if (IS_ERR(nacl))
+			return PTR_ERR(nacl);
+		*acl = nacl;
+		return 0;
+	}
 
 	pacl = get_inode_acl(inode, ACL_TYPE_ACCESS);
 	if (!pacl)
@@ -783,14 +794,19 @@ out_estate:
 	return ret;
 }
 
-__be32 nfsd4_acl_to_attr(enum nfs_ftype4 type, struct nfs4_acl *acl,
-			 struct nfsd_attrs *attr)
+__be32 nfsd4_acl_to_attr(struct inode *inode, enum nfs_ftype4 type,
+			 struct nfs4_acl *acl, struct nfsd_attrs *attr)
 {
 	int host_error;
 	unsigned int flags = 0;
 
 	if (!acl)
 		return nfs_ok;
+
+	if (IS_NFS4ACL(inode)) {
+		attr->na_acl = acl;
+		return nfs_ok;
+	}
 
 	if (type == NF4DIR)
 		flags = NFS4_ACL_DIR;
