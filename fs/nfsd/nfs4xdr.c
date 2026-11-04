@@ -3107,7 +3107,7 @@ static __be32 nfsd4_encode_fs_locations4(struct xdr_stream *xdr,
 }
 
 static __be32 nfsd4_encode_nfsace4(struct xdr_stream *xdr, struct svc_rqst *rqstp,
-				   struct nfs4_ace *ace)
+				   const struct nfs4_ace *ace)
 {
 	__be32 status;
 
