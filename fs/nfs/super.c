@@ -1075,6 +1075,8 @@ static void nfs_fill_super(struct super_block *sb, struct nfs_fs_context *ctx)
 		break;
 	case 4:
 		sb->s_iflags |= SB_I_NOUMASK;
+		if (server->attr_bitmask[0] & FATTR4_WORD0_ACL)
+			sb->s_iflags |= SB_I_NFS4ACL;
 		sb->s_time_gran = 1;
 		sb->s_time_min = S64_MIN;
 		sb->s_time_max = S64_MAX;
