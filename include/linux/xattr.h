@@ -76,6 +76,18 @@ struct xattr {
 	size_t value_len;
 };
 
+#define XATTR_NAME_NFSV4_ACL "system.nfs4_acl"
+#define XATTR_NAME_NFSV4_DACL "system.nfs4_dacl"
+#define XATTR_NAME_NFSV4_SACL "system.nfs4_sacl"
+
+enum nfs4_acl_type;
+struct nfs4_acl;
+struct nfs4_acl *vfs_get_nfs4_acl(struct dentry *dentry,
+				  enum nfs4_acl_type type);
+int vfs_set_nfs4_acl_locked(struct mnt_idmap *idmap,
+			    struct dentry *dentry, enum nfs4_acl_type type,
+			    const struct nfs4_acl *acl);
+
 ssize_t __vfs_getxattr(struct dentry *, struct inode *, const char *, void *, size_t);
 ssize_t vfs_getxattr(struct mnt_idmap *, struct dentry *, const char *,
 		     void *, size_t);

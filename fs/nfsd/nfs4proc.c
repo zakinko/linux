@@ -90,8 +90,16 @@ check_attr_support(struct nfsd4_compound_state *cstate, u32 *bmval,
 
 	if (!nfsd_attrs_supported(cstate->minorversion, bmval))
 		return nfserr_attrnotsupp;
-	if ((bmval[0] & FATTR4_WORD0_ACL) && !IS_POSIXACL(d_inode(dentry)))
+	if ((bmval[0] & FATTR4_WORD0_ACL) &&
+	    !nfsd4_acl_supported(d_inode(dentry)))
 		return nfserr_attrnotsupp;
+	if (bmval[1] & (FATTR4_WORD1_DACL | FATTR4_WORD1_SACL)) {
+		if (!IS_NFS41ACL(d_inode(dentry)))
+			return nfserr_attrnotsupp;
+		/* RFC 8881 6.4.1 */
+		if (bmval[0] & FATTR4_WORD0_ACL)
+			return nfserr_attrnotsupp;
+	}
 	if ((bmval[2] & (FATTR4_WORD2_POSIX_DEFAULT_ACL |
 					FATTR4_WORD2_POSIX_ACCESS_ACL)) &&
 					!IS_POSIXACL(d_inode(dentry)))
@@ -281,8 +289,8 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 			goto out;
 		}
 		if (is_create_with_attrs(open)) {
-			status = nfsd4_acl_to_attr(NF4REG, open->op_acl,
-						   &attrs);
+			status = nfsd4_acl_to_attr(inode, NF4REG,
+						   open->op_acl, &attrs);
 			if (status)
 				goto out;
 		}
@@ -306,6 +314,9 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		if (status != nfs_ok)
 			goto out;
 	}
+	status = nfsd4_acl41_to_attr(open->op_dacl, open->op_sacl, &attrs);
+	if (status)
+		goto out;
 
 	v_mtime = 0;
 	v_atime = 0;
@@ -374,8 +385,7 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		goto out;
 	}
 
-	if (!IS_POSIXACL(inode))
-		iap->ia_mode &= ~current_umask();
+	iap->ia_mode = mode_strip_umask(inode, iap->ia_mode);
 
 	status = fh_fill_pre_attrs(fhp);
 	if (status != nfs_ok)
@@ -413,6 +423,10 @@ set_attr:
 		open->op_bmval[2] &= ~FATTR4_WORD2_POSIX_DEFAULT_ACL;
 	if (attrs.na_paclerr)
 		open->op_bmval[2] &= ~FATTR4_WORD2_POSIX_ACCESS_ACL;
+	if (attrs.na_daclerr)
+		open->op_bmval[1] &= ~FATTR4_WORD1_DACL;
+	if (attrs.na_saclerr)
+		open->op_bmval[1] &= ~FATTR4_WORD1_SACL;
 out:
 	end_creating(child);
 	nfsd_attrs_free(&attrs);
@@ -868,11 +882,15 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 			status = nfserr_inval;
 			goto out_aftermask;
 		}
-		status = nfsd4_acl_to_attr(create->cr_type, create->cr_acl,
-								&attrs);
+		status = nfsd4_acl_to_attr(d_inode(cstate->current_fh.fh_dentry),
+					   create->cr_type,
+					   create->cr_acl, &attrs);
 		if (status != nfs_ok)
 			goto out_aftermask;
 	}
+	status = nfsd4_acl41_to_attr(create->cr_dacl, create->cr_sacl, &attrs);
+	if (status != nfs_ok)
+		goto out_aftermask;
 	current->fs->umask = create->cr_umask;
 	switch (create->cr_type) {
 	case NF4LNK:
@@ -937,6 +955,10 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 		create->cr_bmval[2] &= ~FATTR4_WORD2_POSIX_DEFAULT_ACL;
 	if (attrs.na_paclerr)
 		create->cr_bmval[2] &= ~FATTR4_WORD2_POSIX_ACCESS_ACL;
+	if (attrs.na_daclerr)
+		create->cr_bmval[1] &= ~FATTR4_WORD1_DACL;
+	if (attrs.na_saclerr)
+		create->cr_bmval[1] &= ~FATTR4_WORD1_SACL;
 	set_change_info(&create->cr_cinfo, &cstate->current_fh);
 	fh_dup2(&cstate->current_fh, &resfh);
 out:
@@ -1311,9 +1333,12 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 	}
 
 	inode = cstate->current_fh.fh_dentry->d_inode;
-	status = nfsd4_acl_to_attr(S_ISDIR(inode->i_mode) ? NF4DIR : NF4REG,
+	status = nfsd4_acl_to_attr(inode, S_ISDIR(inode->i_mode) ? NF4DIR : NF4REG,
 				   setattr->sa_acl, &attrs);
 
+	if (status)
+		goto out;
+	status = nfsd4_acl41_to_attr(setattr->sa_dacl, setattr->sa_sacl, &attrs);
 	if (status)
 		goto out;
 	save_no_wcc = cstate->current_fh.fh_no_wcc;
@@ -1326,6 +1351,10 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 		status = nfserrno(attrs.na_dpaclerr);
 	if (!status)
 		status = nfserrno(attrs.na_paclerr);
+	if (!status)
+		status = nfserrno(attrs.na_daclerr);
+	if (!status)
+		status = nfserrno(attrs.na_saclerr);
 out:
 	fh_drop_write(&cstate->current_fh);
 out_err:
@@ -3437,6 +3466,8 @@ static u32 nfsd4_getattr_rsize(const struct svc_rqst *rqstp,
 	u32 ret = 0;
 
 	if (bmap0 & FATTR4_WORD0_ACL)
+		return nfsd4_max_payload(rqstp);
+	if (bmap1 & (FATTR4_WORD1_DACL | FATTR4_WORD1_SACL))
 		return nfsd4_max_payload(rqstp);
 	if (bmap0 & FATTR4_WORD0_FS_LOCATIONS)
 		return nfsd4_max_payload(rqstp);

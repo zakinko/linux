@@ -115,6 +115,8 @@ setattr:	exclusive
 permission:	no (may not block if called in rcu-walk mode)
 get_inode_acl:	no
 get_acl:	no
+get_nfs4_acl:	no
+set_nfs4_acl:	exclusive
 getattr:	no
 listxattr:	no
 fiemap:		no

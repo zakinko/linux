@@ -633,6 +633,18 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		else
 			attr->na_paclerr = -EINVAL;
 	}
+	if (attr->na_acl)
+		attr->na_paclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_ACL,
+							   attr->na_acl);
+	if (attr->na_dacl)
+		attr->na_daclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_DACL,
+							   attr->na_dacl);
+	if (attr->na_sacl)
+		attr->na_saclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_SACL,
+							   attr->na_sacl);
 out_fill_attrs:
 	/*
 	 * RFC 1813 Section 3.3.2 does not mandate that an NFS server
@@ -1819,8 +1831,7 @@ nfsd_create_locked(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		iap->ia_mode = 0;
 	iap->ia_mode = (iap->ia_mode & S_IALLUGO) | type;
 
-	if (!IS_POSIXACL(dirp))
-		iap->ia_mode &= ~current_umask();
+	iap->ia_mode = mode_strip_umask(dirp, iap->ia_mode);
 
 	err = 0;
 	switch (type) {

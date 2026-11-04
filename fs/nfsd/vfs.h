@@ -54,10 +54,15 @@ struct nfsd_attrs {
 	struct xdr_netobj	*na_seclabel;	/* input */
 	struct posix_acl	*na_pacl;	/* input */
 	struct posix_acl	*na_dpacl;	/* input */
+	struct nfs4_acl		*na_acl;	/* input, not owned */
+	struct nfs4_acl		*na_dacl;	/* input, not owned */
+	struct nfs4_acl		*na_sacl;	/* input, not owned */
 
 	int			na_labelerr;	/* output */
 	int			na_dpaclerr;	/* output */
 	int			na_paclerr;	/* output */
+	int			na_daclerr;	/* output */
+	int			na_saclerr;	/* output */
 };
 
 static inline void nfsd_attrs_free(struct nfsd_attrs *attrs)
@@ -72,7 +77,8 @@ static inline bool nfsd_attrs_valid(struct nfsd_attrs *attrs)
 
 	return (iap->ia_valid || (attrs->na_seclabel &&
 		attrs->na_seclabel->len) ||
-		attrs->na_pacl || attrs->na_dpacl);
+		attrs->na_pacl || attrs->na_dpacl || attrs->na_acl ||
+		attrs->na_dacl || attrs->na_sacl);
 }
 
 __be32		nfserrno (int errno);
