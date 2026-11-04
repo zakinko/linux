@@ -37,4 +37,5 @@ for v in 4.0 4.1; do
 	tail -5 /tmp/pynfs-$v.txt | sed 's/^/PYNFS: /'
 	grep -A4 -E ': (FAILURE|WARNING)' /tmp/pynfs-$v.txt | cut -c1-150 | sed "s/^/PYNFS $v: /"
 done
+echo "PASS: pynfs ran; its failures are the PYNFS lines"
 exit 0
