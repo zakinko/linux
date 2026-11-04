@@ -48,7 +48,8 @@ if grep -q ':1234:' /tmp/acl.a; then
 else
 	echo "FAIL: a does not show the ACE for 1234; the rig cannot see ACLs"
 fi
-if cmp -s /tmp/acl.a /tmp/acl.b; then
+# The first line names the file, and so the mount.
+if [ "$(sed 1d /tmp/acl.a)" = "$(sed 1d /tmp/acl.b)" ]; then
 	echo "PASS: b shows the same ACL as a"
 else
 	echo "FAIL: b shows a different ACL from a"
