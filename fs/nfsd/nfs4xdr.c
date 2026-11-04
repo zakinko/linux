@@ -319,6 +319,20 @@ nfsd4_decode_nfsace4(struct nfsd4_compoundargs *argp, struct nfs4_ace *ace)
 		status = nfsd_map_name_to_uid(argp->rqstp,
 				(char *)p, length, &ace->who_uid);
 
+	/*
+	 * Only a filesystem with NFSv4 ACLs can use a name with no local id.
+	 * Which one that is shows at nfsd4_acl_to_attr().
+	 */
+	if (status == nfserr_badowner && length) {
+		char *str = svcxdr_tmpalloc(argp, length);
+
+		if (!str)
+			return nfserr_jukebox;
+		ace->whotype = NFS4_ACL_WHO_STRING;
+		ace->who_str = memcpy(str, p, length);
+		ace->who_strlen = length;
+		status = nfs_ok;
+	}
 	return status;
 }
 
@@ -3072,6 +3086,10 @@ static __be32 nfsd4_encode_nfsace4(struct xdr_stream *xdr, struct svc_rqst *rqst
 	if (status != nfs_ok)
 		return nfserr_resource;
 	/* who */
+	if (ace->whotype == NFS4_ACL_WHO_STRING)
+		return xdr_stream_encode_opaque(xdr, ace->who_str,
+						ace->who_strlen) < 0 ?
+			nfserr_resource : nfs_ok;
 	if (ace->whotype != NFS4_ACL_WHO_NAMED)
 		return nfs4_acl_write_who(xdr, ace->whotype);
 	if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
@@ -3321,7 +3339,7 @@ static __be32 nfsd4_encode_fattr4_supported_attrs(struct xdr_stream *xdr,
 	u32 supp[3];
 
 	memcpy(supp, nfsd_suppattrs[minorversion], sizeof(supp));
-	if (!IS_POSIXACL(d_inode(args->dentry)))
+	if (!nfsd4_acl_supported(d_inode(args->dentry)))
 		supp[0] &= ~FATTR4_WORD0_ACL;
 	if (!args->contextsupport)
 		supp[2] &= ~FATTR4_WORD2_SECURITY_LABEL;
@@ -3454,7 +3472,7 @@ static __be32 nfsd4_encode_fattr4_aclsupport(struct xdr_stream *xdr,
 	u32 mask;
 
 	mask = 0;
-	if (IS_POSIXACL(d_inode(args->dentry)))
+	if (nfsd4_acl_supported(d_inode(args->dentry)))
 		mask = ACL4_SUPPORT_ALLOW_ACL | ACL4_SUPPORT_DENY_ACL;
 	return nfsd4_encode_uint32_t(xdr, mask);
 }
@@ -3753,7 +3771,7 @@ static __be32 nfsd4_encode_fattr4_suppattr_exclcreat(struct xdr_stream *xdr,
 	u32 supp[3];
 
 	memcpy(supp, nfsd_suppattrs[resp->cstate.minorversion], sizeof(supp));
-	if (!IS_POSIXACL(d_inode(args->dentry)))
+	if (!nfsd4_acl_supported(d_inode(args->dentry)))
 		supp[0] &= ~FATTR4_WORD0_ACL;
 	if (!args->contextsupport)
 		supp[2] &= ~FATTR4_WORD2_SECURITY_LABEL;
@@ -3855,7 +3873,9 @@ static __be32 nfsd4_encode_fattr4_acl_trueform(struct xdr_stream *xdr,
 {
 	aclmodel4 trueform = ACL_MODEL_NONE;
 
-	if (IS_POSIXACL(d_inode(args->dentry)))
+	if (IS_NFS4ACL(d_inode(args->dentry)))
+		trueform = ACL_MODEL_NFS4;
+	else if (IS_POSIXACL(d_inode(args->dentry)))
 		trueform = ACL_MODEL_POSIX_DRAFT;
 	if (!xdrgen_encode_aclmodel4(xdr, trueform))
 		return nfserr_resource;

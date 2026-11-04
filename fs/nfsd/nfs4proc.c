@@ -144,7 +144,8 @@ check_attr_support(struct nfsd4_compound_state *cstate, u32 *bmval,
 
 	if (!nfsd_attrs_supported(cstate->minorversion, bmval))
 		return nfserr_attrnotsupp;
-	if ((bmval[0] & FATTR4_WORD0_ACL) && !IS_POSIXACL(d_inode(dentry)))
+	if ((bmval[0] & FATTR4_WORD0_ACL) &&
+	    !nfsd4_acl_supported(d_inode(dentry)))
 		return nfserr_attrnotsupp;
 	if ((bmval[2] & (FATTR4_WORD2_POSIX_DEFAULT_ACL |
 					FATTR4_WORD2_POSIX_ACCESS_ACL)) &&
@@ -385,8 +386,8 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 			/* Cannot specify both NFSv4 and Posix ACLs */
 			return nfserr_inval;
 		}
-		status = nfsd4_acl_to_attr(NF4REG, open->op_acl,
-						   &attrs);
+		status = nfsd4_acl_to_attr(d_inode(parent.dentry), NF4REG,
+					   open->op_acl, &attrs);
 		if (status)
 			return status;
 	} else {
@@ -961,8 +962,9 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 			status = nfserr_inval;
 			goto out_aftermask;
 		}
-		status = nfsd4_acl_to_attr(create->cr_type, create->cr_acl,
-								&attrs);
+		status = nfsd4_acl_to_attr(d_inode(cstate->current_fh.fh_dentry),
+					   create->cr_type,
+					   create->cr_acl, &attrs);
 		if (status != nfs_ok)
 			goto out_aftermask;
 	}
@@ -1422,7 +1424,7 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 	}
 
 	inode = cstate->current_fh.fh_dentry->d_inode;
-	status = nfsd4_acl_to_attr(S_ISDIR(inode->i_mode) ? NF4DIR : NF4REG,
+	status = nfsd4_acl_to_attr(inode, S_ISDIR(inode->i_mode) ? NF4DIR : NF4REG,
 				   setattr->sa_acl, &attrs);
 
 	if (status)
