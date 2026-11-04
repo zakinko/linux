@@ -678,6 +678,18 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		else
 			attr->na_paclerr = -EINVAL;
 	}
+	if (attr->na_acl)
+		attr->na_paclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_ACL,
+							   attr->na_acl);
+	if (attr->na_dacl)
+		attr->na_daclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_DACL,
+							   attr->na_dacl);
+	if (attr->na_sacl)
+		attr->na_saclerr = vfs_set_nfs4_acl_locked(&nop_mnt_idmap,
+							   dentry, NFS4ACL_SACL,
+							   attr->na_sacl);
 out_fill_attrs:
 	/*
 	 * RFC 1813 Section 3.3.2 does not mandate that an NFS server
