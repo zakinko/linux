@@ -14,6 +14,7 @@
 #include <linux/file.h>
 #include <linux/xattr.h>
 #include <linux/nfs4.h>
+#include <linux/sunrpc/xdr.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/security.h>
@@ -762,12 +763,244 @@ int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx)
 	return error;
 }
 
+/*
+ * The xattrs that present NFSv4 ACLs hold the XDR of the attribute, so that
+ * nfs4-acl-tools works on them as it does over NFS.  A filesystem with
+ * inode operations for the ACLs need not know the format.  One with its own
+ * handler, as the NFS client has, keeps it: its value comes from the wire.
+ */
+static enum nfs4_acl_type nfs4_acl_xattr_type(struct inode *inode,
+					      const char *name)
+{
+	enum nfs4_acl_type type;
+
+	if (!IS_NFS4ACL(inode))
+		return NFS4ACL_NONE;
+	if (!strcmp(name, XATTR_NAME_NFSV4_ACL))
+		type = NFS4ACL_ACL;
+	else if (!strcmp(name, XATTR_NAME_NFSV4_DACL))
+		type = NFS4ACL_DACL;
+	else if (!strcmp(name, XATTR_NAME_NFSV4_SACL))
+		type = NFS4ACL_SACL;
+	else
+		return NFS4ACL_NONE;
+	if (!IS_ERR(xattr_resolve_name(inode, &name)))
+		return NFS4ACL_NONE;
+	return type;
+}
+
+/*
+ * The ids are the filesystem's; give them as seen through @idmap, in the
+ * caller's user namespace, as vfs_posix_acl_to_xattr() does.
+ */
+static int nfs4_ace_who(const struct mnt_idmap *idmap,
+			struct user_namespace *fs_userns,
+			const struct nfs4_ace *ace, char *num, const char **who)
+{
+	struct user_namespace *ns = current_user_ns();
+
+	switch (ace->whotype) {
+	case NFS4_ACL_WHO_OWNER:
+		*who = "OWNER@";
+		return 6;
+	case NFS4_ACL_WHO_GROUP:
+		*who = "GROUP@";
+		return 6;
+	case NFS4_ACL_WHO_EVERYONE:
+		*who = "EVERYONE@";
+		return 9;
+	case NFS4_ACL_WHO_STRING:
+		*who = ace->who_str;
+		return ace->who_strlen;
+	}
+	*who = num;
+	if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP) {
+		vfsgid_t vfsgid = make_vfsgid(idmap, fs_userns, ace->who_gid);
+
+		return sprintf(num, "%u",
+			       from_kgid_munged(ns, vfsgid_into_kgid(vfsgid)));
+	} else {
+		vfsuid_t vfsuid = make_vfsuid(idmap, fs_userns, ace->who_uid);
+
+		return sprintf(num, "%u",
+			       from_kuid_munged(ns, vfsuid_into_kuid(vfsuid)));
+	}
+}
+
+static ssize_t do_get_nfs4_acl(const struct mnt_idmap *idmap,
+			       struct dentry *dentry, enum nfs4_acl_type type,
+			       void *value, size_t size)
+{
+	struct user_namespace *fs_userns = i_user_ns(d_inode(dentry));
+	struct nfs4_acl *acl = vfs_get_nfs4_acl(idmap, dentry, type);
+	char num[sizeof("4294967295")];
+	const char *who;
+	ssize_t len = 0;
+	__be32 *p = value;
+	u32 i;
+
+	if (IS_ERR(acl))
+		return PTR_ERR(acl);
+	if (type != NFS4ACL_ACL)
+		len += XDR_UNIT;
+	len += XDR_UNIT;
+	for (i = 0; i < acl->naces; i++)
+		len += 4 * XDR_UNIT +
+		       xdr_align_size(nfs4_ace_who(idmap, fs_userns,
+						   &acl->aces[i], num, &who));
+	if (!size)
+		goto out;
+	if (len > size) {
+		len = -ERANGE;
+		goto out;
+	}
+	if (type != NFS4ACL_ACL)
+		*p++ = cpu_to_be32(acl->flag);
+	*p++ = cpu_to_be32(acl->naces);
+	for (i = 0; i < acl->naces; i++) {
+		const struct nfs4_ace *ace = &acl->aces[i];
+		int n = nfs4_ace_who(idmap, fs_userns, ace, num, &who);
+
+		*p++ = cpu_to_be32(ace->type);
+		*p++ = cpu_to_be32(ace->flag);
+		*p++ = cpu_to_be32(ace->access_mask);
+		p = xdr_encode_opaque(p, who, n);
+	}
+out:
+	kfree(acl);
+	return len;
+}
+
+static int nfs4_ace_set_who(struct nfs4_ace *ace, const char *who, u32 len,
+			    char **strs)
+{
+	struct user_namespace *ns = current_user_ns();
+	char num[sizeof("4294967295")];
+	u32 id;
+
+	ace->who_uid = INVALID_UID;
+	if (len == 6 && !memcmp(who, "OWNER@", 6))
+		ace->whotype = NFS4_ACL_WHO_OWNER;
+	else if (len == 6 && !memcmp(who, "GROUP@", 6))
+		ace->whotype = NFS4_ACL_WHO_GROUP;
+	else if (len == 9 && !memcmp(who, "EVERYONE@", 9))
+		ace->whotype = NFS4_ACL_WHO_EVERYONE;
+	else
+		ace->whotype = NFS4_ACL_WHO_NAMED;
+	if (ace->whotype != NFS4_ACL_WHO_NAMED) {
+		/* RFC 8881 6.2.1.5 */
+		ace->flag &= ~NFS4_ACE_IDENTIFIER_GROUP;
+		return 0;
+	}
+	if (len && len < sizeof(num)) {
+		memcpy(num, who, len);
+		num[len] = '\0';
+		if (!kstrtou32(num, 10, &id)) {
+			if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP) {
+				ace->who_gid = make_kgid(ns, id);
+				return gid_valid(ace->who_gid) ? 0 : -EINVAL;
+			}
+			ace->who_uid = make_kuid(ns, id);
+			return uid_valid(ace->who_uid) ? 0 : -EINVAL;
+		}
+	}
+	if (!len)
+		return -EINVAL;
+	ace->whotype = NFS4_ACL_WHO_STRING;
+	ace->who_str = memcpy(*strs, who, len);
+	ace->who_strlen = len;
+	*strs += len;
+	return 0;
+}
+
+static struct nfs4_acl *nfs4_acl_from_xattr(const void *value, size_t size,
+					    enum nfs4_acl_type type)
+{
+	const __be32 *p = value, *end = p + size / XDR_UNIT;
+	struct nfs4_acl *acl;
+	u32 i, naces, flag = 0;
+	char *strs;
+	int ret;
+
+	if (size % XDR_UNIT)
+		return ERR_PTR(-EINVAL);
+	if (type != NFS4ACL_ACL) {
+		if (end == p)
+			return ERR_PTR(-EINVAL);
+		flag = be32_to_cpup(p++);
+	}
+	if (end == p)
+		return ERR_PTR(-EINVAL);
+	naces = be32_to_cpup(p++);
+	/* An ACE is at least five words. */
+	if (naces > (end - p) / 5)
+		return ERR_PTR(-EINVAL);
+	acl = kmalloc(struct_size(acl, aces, naces) + size, GFP_KERNEL);
+	if (!acl)
+		return ERR_PTR(-ENOMEM);
+	acl->flag = flag;
+	acl->naces = naces;
+	strs = (char *)&acl->aces[naces];
+	ret = -EINVAL;
+	for (i = 0; i < naces; i++) {
+		struct nfs4_ace *ace = &acl->aces[i];
+		u32 len;
+
+		if (end - p < 4)
+			goto err;
+		ace->type = be32_to_cpup(p++);
+		ace->flag = be32_to_cpup(p++);
+		ace->access_mask = be32_to_cpup(p++);
+		len = be32_to_cpup(p++);
+		if (len > (end - p) * XDR_UNIT)
+			goto err;
+		ret = nfs4_ace_set_who(ace, (const char *)p, len, &strs);
+		if (ret)
+			goto err;
+		ret = -EINVAL;
+		p += XDR_QUADLEN(len);
+	}
+	if (p != end)
+		goto err;
+	return acl;
+err:
+	kfree(acl);
+	return ERR_PTR(ret);
+}
+
+static int do_set_nfs4_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
+			   enum nfs4_acl_type type, const void *value,
+			   size_t size)
+{
+	struct inode *inode = d_inode(dentry);
+	struct nfs4_acl *acl;
+	int error;
+
+	if (!value)
+		return -EINVAL;
+	acl = nfs4_acl_from_xattr(value, size, type);
+	if (IS_ERR(acl))
+		return PTR_ERR(acl);
+	inode_lock(inode);
+	error = vfs_set_nfs4_acl_locked(idmap, dentry, type, acl);
+	inode_unlock(inode);
+	kfree(acl);
+	return error;
+}
+
 static int do_setxattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		struct kernel_xattr_ctx *ctx)
 {
+	enum nfs4_acl_type type;
+
 	if (is_posix_acl_xattr(ctx->kname->name))
 		return do_set_acl(idmap, dentry, ctx->kname->name,
 				  ctx->kvalue, ctx->size);
+
+	type = nfs4_acl_xattr_type(d_inode(dentry), ctx->kname->name);
+	if (type != NFS4ACL_NONE)
+		return do_set_nfs4_acl(idmap, dentry, type, ctx->kvalue,
+				       ctx->size);
 
 	return vfs_setxattr(idmap, dentry, ctx->kname->name,
 			ctx->kvalue, ctx->size, ctx->flags);
@@ -903,6 +1136,7 @@ do_getxattr(const struct mnt_idmap *idmap, struct dentry *d,
 	ssize_t error;
 	char *kname = ctx->kname->name;
 	void *kvalue = NULL;
+	enum nfs4_acl_type type;
 
 	if (ctx->size) {
 		if (ctx->size > XATTR_SIZE_MAX)
@@ -912,8 +1146,11 @@ do_getxattr(const struct mnt_idmap *idmap, struct dentry *d,
 			return -ENOMEM;
 	}
 
+	type = nfs4_acl_xattr_type(d_inode(d), kname);
 	if (is_posix_acl_xattr(kname))
 		error = do_get_acl(idmap, d, kname, kvalue, ctx->size);
+	else if (type != NFS4ACL_NONE)
+		error = do_get_nfs4_acl(idmap, d, type, kvalue, ctx->size);
 	else
 		error = vfs_getxattr(idmap, d, kname, kvalue, ctx->size);
 	if (error > 0) {
