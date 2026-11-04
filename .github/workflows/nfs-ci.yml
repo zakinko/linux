@@ -38,7 +38,7 @@ jobs:
           exit $missing
 
       - name: Build
-        run: make -s -j$(nproc) bzImage modules
+        run: make -k -s -j$(nproc) bzImage modules
 
       - name: Fetch pynfs
         continue-on-error: true

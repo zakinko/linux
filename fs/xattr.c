@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/xattr.h>
+#include <linux/nfs4.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/security.h>
