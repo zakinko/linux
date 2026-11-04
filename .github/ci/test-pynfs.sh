@@ -25,7 +25,8 @@ rpc.mountd
 echo 10 > /proc/fs/nfsd/nfsv4leasetime
 echo 10 > /proc/fs/nfsd/nfsv4gracetime
 rpc.nfsd 8
-sleep 15
+# Locks also wait for lockd's own grace, which the files above do not shorten.
+sleep 100
 
 for v in 4.0 4.1; do
 	cd $P/nfs$v || continue

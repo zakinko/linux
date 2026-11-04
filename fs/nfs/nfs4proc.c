@@ -7903,7 +7903,12 @@ static int nfs4_acl_decode_ace(const struct nfs_server *server,
 		else
 			ret = nfs_map_name_to_uid(server, who, len,
 						  &ace->who_uid);
-		if (ret) {
+		/*
+		 * nfsidmap answers an unknown name with nobody, which is not
+		 * who the ACL names.  The id of nobody and any failure are
+		 * the same here: the name itself is all that is known.
+		 */
+		if (ret || from_kuid(&init_user_ns, ace->who_uid) == overflowuid) {
 			/* Keep the name: nobody would be a different ACL. */
 			ace->whotype = NFS4_ACL_WHO_STRING;
 			ace->who_str = memcpy(*strs, who, len);
