@@ -673,6 +673,11 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		else
 			attr->na_paclerr = -EINVAL;
 	}
+	/* The new object of a CREATE can be a symlink, which has no ACL. */
+	if (attr->na_acl)
+		attr->na_paclerr = IS_NFS4ACL(inode) ?
+			inode->i_op->set_nfs4_acl(dentry, attr->na_acl) :
+			-EOPNOTSUPP;
 out_fill_attrs:
 	/*
 	 * RFC 1813 Section 3.3.2 does not mandate that an NFS server
