@@ -7868,7 +7868,189 @@ int nfs4_lock_delegation_recall(struct file_lock *fl, struct nfs4_state *state, 
 	return nfs4_handle_delegation_recall_error(server, state, stateid, fl, err);
 }
 
-#define XATTR_NAME_NFSV4_ACL "system.nfs4_acl"
+static int nfs4_acl_decode_ace(const struct nfs_server *server,
+			       const __be32 **pp, const __be32 *end,
+			       struct nfs4_ace *ace, char **strs)
+{
+	const __be32 *p = *pp;
+	const char *who;
+	u32 len;
+	int ret;
+
+	if (end - p < 4)
+		return -EIO;
+	ace->type = be32_to_cpup(p++);
+	ace->flag = be32_to_cpup(p++);
+	ace->access_mask = be32_to_cpup(p++);
+	len = be32_to_cpup(p++);
+	if (len > (end - p) * XDR_UNIT || len == 0)
+		return -EIO;
+	who = (const char *)p;
+	*pp = p + XDR_QUADLEN(len);
+
+	ace->who_uid = INVALID_UID;
+	if (len == 6 && !memcmp(who, "OWNER@", 6))
+		ace->whotype = NFS4_ACL_WHO_OWNER;
+	else if (len == 6 && !memcmp(who, "GROUP@", 6))
+		ace->whotype = NFS4_ACL_WHO_GROUP;
+	else if (len == 9 && !memcmp(who, "EVERYONE@", 9))
+		ace->whotype = NFS4_ACL_WHO_EVERYONE;
+	else {
+		ace->whotype = NFS4_ACL_WHO_NAMED;
+		if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
+			ret = nfs_map_group_to_gid(server, who, len,
+						   &ace->who_gid);
+		else
+			ret = nfs_map_name_to_uid(server, who, len,
+						  &ace->who_uid);
+		/*
+		 * nfsidmap answers an unknown name with nobody, which is not
+		 * who the ACL names.  The id of nobody and any failure are
+		 * the same here: the name itself is all that is known.
+		 */
+		if (ret || from_kuid(&init_user_ns, ace->who_uid) == overflowuid) {
+			/* Keep the name: nobody would be a different ACL. */
+			ace->whotype = NFS4_ACL_WHO_STRING;
+			ace->who_str = memcpy(*strs, who, len);
+			ace->who_strlen = len;
+			*strs += len;
+		}
+		return 0;
+	}
+	/* RFC 8881 6.2.1.5 */
+	ace->flag &= ~NFS4_ACE_IDENTIFIER_GROUP;
+	return 0;
+}
+
+static struct nfs4_acl *nfs4_acl_decode(const struct nfs_server *server,
+					const void *buf, size_t buflen,
+					enum nfs4_acl_type type)
+{
+	const __be32 *p = buf, *end = p + buflen / XDR_UNIT;
+	struct nfs4_acl *acl;
+	char *strs;
+	u32 i, naces, flag = 0;
+	int ret;
+
+	if (type != NFS4ACL_ACL) {
+		if (end == p)
+			return ERR_PTR(-EIO);
+		flag = be32_to_cpup(p++);
+	}
+	if (end == p)
+		return ERR_PTR(-EIO);
+	naces = be32_to_cpup(p++);
+	/* An ACE is at least five words. */
+	if (naces > (end - p) / 5)
+		return ERR_PTR(-EIO);
+	/* Any names kept follow the array; they cannot outgrow @buf. */
+	acl = kmalloc(struct_size(acl, aces, naces) + buflen, GFP_KERNEL);
+	if (!acl)
+		return ERR_PTR(-ENOMEM);
+	acl->flag = flag;
+	acl->naces = naces;
+	strs = (char *)&acl->aces[naces];
+	for (i = 0; i < naces; i++) {
+		ret = nfs4_acl_decode_ace(server, &p, end, &acl->aces[i],
+					  &strs);
+		if (ret) {
+			kfree(acl);
+			return ERR_PTR(ret);
+		}
+	}
+	return acl;
+}
+
+static struct nfs4_acl *nfs4_get_nfs4_acl(struct dentry *dentry,
+					  enum nfs4_acl_type type)
+{
+	struct inode *inode = d_inode(dentry);
+	struct nfs4_acl *acl;
+	ssize_t len;
+	void *buf;
+	int retries = 3;
+
+	do {
+		len = nfs4_proc_get_acl(inode, NULL, 0, type);
+		if (len < 0)
+			return ERR_PTR(len);
+		buf = kvmalloc(len, GFP_KERNEL);
+		if (!buf)
+			return ERR_PTR(-ENOMEM);
+		/* The ACL can grow between the two calls. */
+		len = nfs4_proc_get_acl(inode, buf, len, type);
+		if (len != -ERANGE)
+			break;
+		kvfree(buf);
+	} while (--retries);
+	if (len == -ERANGE)
+		return ERR_PTR(-EIO);
+	acl = len < 0 ? ERR_PTR(len) :
+		nfs4_acl_decode(NFS_SERVER(inode), buf, len, type);
+	kvfree(buf);
+	return acl;
+}
+
+static int nfs4_set_nfs4_acl(struct dentry *dentry, enum nfs4_acl_type type,
+			     const struct nfs4_acl *acl)
+{
+	struct inode *inode = d_inode(dentry);
+	const struct nfs_server *server = NFS_SERVER(inode);
+	char name[IDMAP_NAMESZ];
+	__be32 *buf, *p;
+	size_t size;
+	u32 i;
+	int ret;
+
+	size = 2 * XDR_UNIT + acl->naces * (4 * XDR_UNIT +
+					    XDR_QUADLEN(IDMAP_NAMESZ) * XDR_UNIT);
+	for (i = 0; i < acl->naces; i++)
+		if (acl->aces[i].whotype == NFS4_ACL_WHO_STRING)
+			size += XDR_QUADLEN(acl->aces[i].who_strlen) * XDR_UNIT;
+	if (size > NFS4ACL_MAXPAGES * PAGE_SIZE)
+		return -ERANGE;
+	buf = kvmalloc(size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	p = buf;
+	if (type != NFS4ACL_ACL)
+		*p++ = cpu_to_be32(acl->flag);
+	*p++ = cpu_to_be32(acl->naces);
+	for (i = 0; i < acl->naces; i++) {
+		const struct nfs4_ace *ace = &acl->aces[i];
+
+		*p++ = cpu_to_be32(ace->type);
+		*p++ = cpu_to_be32(ace->flag);
+		*p++ = cpu_to_be32(ace->access_mask);
+		switch (ace->whotype) {
+		case NFS4_ACL_WHO_OWNER:
+			p = xdr_encode_opaque(p, "OWNER@", 6);
+			continue;
+		case NFS4_ACL_WHO_GROUP:
+			p = xdr_encode_opaque(p, "GROUP@", 6);
+			continue;
+		case NFS4_ACL_WHO_EVERYONE:
+			p = xdr_encode_opaque(p, "EVERYONE@", 9);
+			continue;
+		case NFS4_ACL_WHO_STRING:
+			p = xdr_encode_opaque(p, ace->who_str, ace->who_strlen);
+			continue;
+		}
+		if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
+			ret = nfs_map_gid_to_group(server, ace->who_gid, name,
+						   sizeof(name));
+		else
+			ret = nfs_map_uid_to_name(server, ace->who_uid, name,
+						  sizeof(name));
+		if (ret < 0)
+			goto out;
+		p = xdr_encode_opaque(p, name, ret);
+	}
+	ret = nfs4_proc_set_acl(inode, buf, (char *)p - (char *)buf, type);
+out:
+	kvfree(buf);
+	return ret;
+}
 
 static int nfs4_xattr_set_nfs4_acl(const struct xattr_handler *handler,
 				   const struct mnt_idmap *idmap,
@@ -7891,7 +8073,6 @@ static bool nfs4_xattr_list_nfs4_acl(struct dentry *dentry)
 	return nfs4_server_supports_acls(NFS_SB(dentry->d_sb), NFS4ACL_ACL);
 }
 
-#define XATTR_NAME_NFSV4_DACL "system.nfs4_dacl"
 
 static int nfs4_xattr_set_nfs4_dacl(const struct xattr_handler *handler,
 				    const struct mnt_idmap *idmap,
@@ -7914,7 +8095,6 @@ static bool nfs4_xattr_list_nfs4_dacl(struct dentry *dentry)
 	return nfs4_server_supports_acls(NFS_SB(dentry->d_sb), NFS4ACL_DACL);
 }
 
-#define XATTR_NAME_NFSV4_SACL "system.nfs4_sacl"
 
 static int nfs4_xattr_set_nfs4_sacl(const struct xattr_handler *handler,
 				    const struct mnt_idmap *idmap,
@@ -10861,6 +11041,8 @@ static const struct inode_operations nfs4_dir_inode_operations = {
 	.setattr	= nfs_setattr,
 	.listxattr	= nfs4_listxattr,
 	.fileattr_get	= nfs_fileattr_get,
+	.get_nfs4_acl	= nfs4_get_nfs4_acl,
+	.set_nfs4_acl	= nfs4_set_nfs4_acl,
 };
 
 static const struct inode_operations nfs4_file_inode_operations = {
@@ -10869,6 +11051,8 @@ static const struct inode_operations nfs4_file_inode_operations = {
 	.setattr	= nfs_setattr,
 	.listxattr	= nfs4_listxattr,
 	.fileattr_get	= nfs_fileattr_get,
+	.get_nfs4_acl	= nfs4_get_nfs4_acl,
+	.set_nfs4_acl	= nfs4_set_nfs4_acl,
 };
 
 static struct nfs_server *nfs4_clone_server(struct nfs_server *source,
