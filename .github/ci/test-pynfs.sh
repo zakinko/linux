@@ -34,6 +34,6 @@ for v in 4.0 4.1; do
 	    --json=/tmp/pynfs-$v.json > /tmp/pynfs-$v.txt 2>&1
 	echo "PYNFS: rc $v $?"
 	tail -5 /tmp/pynfs-$v.txt | sed 's/^/PYNFS: /'
-	grep -E ': (FAILURE|WARNING)' /tmp/pynfs-$v.txt | sed "s/^/PYNFS $v: /"
+	grep -A4 -E ': (FAILURE|WARNING)' /tmp/pynfs-$v.txt | cut -c1-150 | sed "s/^/PYNFS $v: /"
 done
 exit 0
