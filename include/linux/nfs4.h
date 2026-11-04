@@ -24,6 +24,7 @@ enum nfs4_acl_whotype {
 	NFS4_ACL_WHO_OWNER,
 	NFS4_ACL_WHO_GROUP,
 	NFS4_ACL_WHO_EVERYONE,
+	NFS4_ACL_WHO_STRING,	/* a principal with no local id */
 };
 
 struct nfs4_ace {
@@ -34,6 +35,10 @@ struct nfs4_ace {
 	union {
 		kuid_t	who_uid;
 		kgid_t	who_gid;
+		struct {
+			const char	*who_str;
+			u32		who_strlen;
+		};
 	};
 };
 
