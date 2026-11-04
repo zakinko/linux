@@ -441,6 +441,8 @@ As of kernel 2.6.22, the following members are defined:
 		int (*tmpfile) (const struct mnt_idmap *, struct inode *, struct file *, umode_t);
 		struct posix_acl * (*get_acl)(const struct mnt_idmap *, struct dentry *, int);
 	        int (*set_acl)(const struct mnt_idmap *, struct dentry *, struct posix_acl *, int);
+		struct nfs4_acl *(*get_nfs4_acl)(struct dentry *, enum nfs4_acl_type);
+		int (*set_nfs4_acl)(struct dentry *, enum nfs4_acl_type, const struct nfs4_acl *);
 		int (*fileattr_set)(const struct mnt_idmap *idmap,
 				    struct dentry *dentry, struct file_kattr *fa);
 		int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
@@ -633,6 +635,18 @@ otherwise noted.
 	called to get the offset context for a directory inode. A
         filesystem must define this operation to use
         simple_offset_dir_operations.
+
+``get_nfs4_acl``
+	called by the VFS to get an NFSv4 ACL of an inode, on a filesystem
+	that sets SB_I_NFS4ACL.  The type is NFS4ACL_ACL, or NFS4ACL_DACL or
+	NFS4ACL_SACL where it also sets SB_I_NFS41ACL.  The result comes from
+	kmalloc(), and any who_str in it lives in the same allocation.
+
+``set_nfs4_acl``
+	called by the VFS to set an NFSv4 ACL, with the inode locked.  Who may
+	do so is the filesystem's decision.  The filesystem keeps the mode and
+	the ACL consistent: RFC 8881 6.4.1.1 and 6.4.1.2 say how.
+
 
 The Address Space Object
 ========================

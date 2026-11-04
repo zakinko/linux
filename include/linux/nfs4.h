@@ -16,31 +16,9 @@
 #include <linux/list.h>
 #include <linux/uidgid.h>
 #include <uapi/linux/nfs4.h>
+#include <linux/nfs4_acl.h>
 #include <linux/sunrpc/msg_prot.h>
 #include <linux/sunrpc/xdrgen/nfs4_1.h>
-
-enum nfs4_acl_whotype {
-	NFS4_ACL_WHO_NAMED = 0,
-	NFS4_ACL_WHO_OWNER,
-	NFS4_ACL_WHO_GROUP,
-	NFS4_ACL_WHO_EVERYONE,
-};
-
-struct nfs4_ace {
-	uint32_t	type;
-	uint32_t	flag;
-	uint32_t	access_mask;
-	int		whotype;
-	union {
-		kuid_t	who_uid;
-		kgid_t	who_gid;
-	};
-};
-
-struct nfs4_acl {
-	uint32_t	naces;
-	struct nfs4_ace	aces[];
-};
 
 #define NFS4_MAXLABELLEN	2048
 
