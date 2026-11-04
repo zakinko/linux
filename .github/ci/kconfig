@@ -1,0 +1,12 @@
+# Options the tests need on top of vng --kconfig; each must survive olddefconfig.
+CONFIG_SUNRPC=y
+CONFIG_NFSD=y
+CONFIG_NFSD_V4=y
+CONFIG_NFS_FS=y
+CONFIG_NFS_V4=y
+CONFIG_NFS_V4_2=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_NFS_V3=y
+CONFIG_NFS_V3_ACL=y
+CONFIG_NFSD_V3_ACL=y
