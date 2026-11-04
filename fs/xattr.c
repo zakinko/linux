@@ -357,6 +357,89 @@ retry_deleg:
 }
 EXPORT_SYMBOL_GPL(vfs_setxattr);
 
+static const char *nfs4_acl_xattr_name(struct inode *inode,
+				       enum nfs4_acl_type type)
+{
+	if (!IS_NFS4ACL(inode))
+		return NULL;
+	switch (type) {
+	case NFS4ACL_ACL:
+		return XATTR_NAME_NFSV4_ACL;
+	case NFS4ACL_DACL:
+		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_DACL : NULL;
+	case NFS4ACL_SACL:
+		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_SACL : NULL;
+	default:
+		return NULL;
+	}
+}
+
+/**
+ * vfs_get_nfs4_acl - get an NFSv4 ACL of an inode
+ * @dentry: the dentry of the inode
+ * @type: acl, dacl or sacl
+ *
+ * The ACL is the one system.nfs4_acl presents, so LSMs are asked about that
+ * attribute.  The caller must kfree() the result.
+ *
+ * Return: the ACL, or an ERR_PTR.
+ */
+struct nfs4_acl *vfs_get_nfs4_acl(struct dentry *dentry,
+				  enum nfs4_acl_type type)
+{
+	struct inode *inode = d_inode(dentry);
+	const char *name = nfs4_acl_xattr_name(inode, type);
+	int error;
+
+	if (!name)
+		return ERR_PTR(-EOPNOTSUPP);
+	error = security_inode_getxattr(dentry, name);
+	if (error)
+		return ERR_PTR(error);
+	return inode->i_op->get_nfs4_acl(dentry, type);
+}
+EXPORT_SYMBOL_GPL(vfs_get_nfs4_acl);
+
+/**
+ * vfs_set_nfs4_acl_locked - set an NFSv4 ACL of an inode
+ * @idmap: idmap of the mount
+ * @dentry: the dentry of the inode
+ * @type: acl, dacl or sacl
+ * @acl: the ACL to set
+ *
+ * The caller holds the inode lock.  Who may set the ACL is the filesystem's
+ * decision: the ACL itself can grant it to someone other than the owner.
+ *
+ * Return: 0 or a negative errno.
+ */
+int vfs_set_nfs4_acl_locked(const struct mnt_idmap *idmap,
+			    struct dentry *dentry, enum nfs4_acl_type type,
+			    const struct nfs4_acl *acl)
+{
+	struct inode *inode = d_inode(dentry);
+	const char *name = nfs4_acl_xattr_name(inode, type);
+	int error;
+
+	if (!name)
+		return -EOPNOTSUPP;
+	/* The ids in @acl are not translated. */
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	error = may_write_xattr(idmap, inode);
+	if (error)
+		return error;
+	error = security_inode_setxattr(idmap, dentry, name, NULL, 0, 0);
+	if (error)
+		return error;
+	error = inode->i_op->set_nfs4_acl(dentry, type, acl);
+	if (error)
+		return error;
+	fsnotify_xattr(dentry);
+	security_inode_post_setxattr(dentry, name, NULL, 0, 0);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vfs_set_nfs4_acl_locked);
+
 static ssize_t
 xattr_getsecurity(const struct mnt_idmap *idmap, struct inode *inode,
 		  const char *name, void *value, size_t size)
