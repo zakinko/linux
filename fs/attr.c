@@ -79,6 +79,17 @@ int setattr_should_drop_suidgid(const struct mnt_idmap *idmap,
 }
 EXPORT_SYMBOL(setattr_should_drop_suidgid);
 
+/*
+ * An NFSv4 ACL can give a right to someone other than the owner.  Ask the
+ * filesystem, on top of the checks below: this only ever grants.
+ */
+static bool nfs4_acl_grants(const struct mnt_idmap *idmap, struct inode *inode,
+			    int mask)
+{
+	return IS_NFS4ACL(inode) && inode->i_op->permission &&
+	       inode->i_op->permission(idmap, inode, mask) == 0;
+}
+
 /**
  * chown_ok - verify permissions to chown inode
  * @idmap:	idmap of the mount @inode was found from
@@ -92,7 +103,7 @@ EXPORT_SYMBOL(setattr_should_drop_suidgid);
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
 static bool chown_ok(const struct mnt_idmap *idmap,
-		     const struct inode *inode, vfsuid_t ia_vfsuid)
+		     struct inode *inode, vfsuid_t ia_vfsuid)
 {
 	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
 	if (vfsuid_eq_kuid(vfsuid, current_fsuid()) &&
@@ -102,6 +113,10 @@ static bool chown_ok(const struct mnt_idmap *idmap,
 		return true;
 	if (!vfsuid_valid(vfsuid) &&
 	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
+		return true;
+	/* RFC 8881 6.2.1.3.1: ACE4_WRITE_OWNER takes ownership for oneself. */
+	if (vfsuid_eq_kuid(ia_vfsuid, current_fsuid()) &&
+	    nfs4_acl_grants(idmap, inode, MAY_WRITE_OWNER))
 		return true;
 	return false;
 }
@@ -119,7 +134,7 @@ static bool chown_ok(const struct mnt_idmap *idmap,
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
 static bool chgrp_ok(const struct mnt_idmap *idmap,
-		     const struct inode *inode, vfsgid_t ia_vfsgid)
+		     struct inode *inode, vfsgid_t ia_vfsgid)
 {
 	vfsgid_t vfsgid = i_gid_into_vfsgid(idmap, inode);
 	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
@@ -133,6 +148,9 @@ static bool chgrp_ok(const struct mnt_idmap *idmap,
 		return true;
 	if (!vfsgid_valid(vfsgid) &&
 	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
+		return true;
+	if (vfsgid_in_group_p(ia_vfsgid) &&
+	    nfs4_acl_grants(idmap, inode, MAY_WRITE_OWNER))
 		return true;
 	return false;
 }
@@ -202,8 +220,12 @@ int setattr_prepare(const struct mnt_idmap *idmap, struct dentry *dentry,
 	if (ia_valid & ATTR_MODE) {
 		vfsgid_t vfsgid;
 
-		if (!inode_owner_or_capable(idmap, inode))
-			return -EPERM;
+		if (!inode_owner_or_capable(idmap, inode)) {
+			if (!nfs4_acl_grants(idmap, inode, MAY_WRITE_ACL))
+				return -EPERM;
+			/* The ACL gives the mode, not what runs as the owner. */
+			attr->ia_mode &= ~(S_ISUID | S_ISGID);
+		}
 
 		if (ia_valid & ATTR_GID)
 			vfsgid = attr->ia_vfsgid;
@@ -217,7 +239,8 @@ int setattr_prepare(const struct mnt_idmap *idmap, struct dentry *dentry,
 
 	/* Check for setting the inode time. */
 	if (ia_valid & (ATTR_MTIME_SET | ATTR_ATIME_SET | ATTR_TIMES_SET)) {
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(idmap, inode) &&
+		    !nfs4_acl_grants(idmap, inode, MAY_WRITE_TIMES))
 			return -EPERM;
 	}
 
