@@ -7905,6 +7905,7 @@ static int nfs4_acl_decode_ace(const struct nfs_server *server,
 						  &ace->who_uid);
 		if (ret) {
 			/* Keep the name: nobody would be a different ACL. */
+			return -EINVAL;
 			ace->whotype = NFS4_ACL_WHO_STRING;
 			ace->who_str = memcpy(*strs, who, len);
 			ace->who_strlen = len;
