@@ -70,6 +70,10 @@ ok('unmapped name reads back on b', rd(B + 'g', D) == named)
 named = struct.pack('>I', 1) + ace(0, 0, 7, 'alice@nowhere')
 os.setxattr(B + 'f', 'system.nfs4_acl', named)
 ok('unmapped name in the acl attribute', rd(A + 'f', 'system.nfs4_acl') == named)
+spc = struct.pack('>I', 1) + ace(0, 0x40, 7, 'EVERYONE@')
+os.setxattr(B + 'g', 'system.nfs4_acl', spc)
+ok('group flag dropped from EVERYONE@',
+   rd(A + 'g', 'system.nfs4_acl') == struct.pack('>I', 1) + ace(0, 0, 7, 'EVERYONE@'))
 inh = struct.pack('>I', 1) + ace(0, 0x80, 7, '1234')
 ok('INHERITED refused in the acl attribute', refused(B + 'g', 'system.nfs4_acl', inh))
 PY

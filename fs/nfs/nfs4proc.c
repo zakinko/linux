@@ -7910,7 +7910,10 @@ static int nfs4_acl_decode_ace(const struct nfs_server *server,
 			ace->who_strlen = len;
 			*strs += len;
 		}
+		return 0;
 	}
+	/* RFC 8881 6.2.1.5 */
+	ace->flag &= ~NFS4_ACE_IDENTIFIER_GROUP;
 	return 0;
 }
 

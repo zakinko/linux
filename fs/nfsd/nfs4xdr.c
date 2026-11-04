@@ -310,9 +310,11 @@ nfsd4_decode_nfsace4(struct nfsd4_compoundargs *argp, struct nfs4_ace *ace)
 	if (!p)
 		return nfserr_bad_xdr;
 	ace->whotype = nfs4_acl_get_whotype((char *)p, length);
-	if (ace->whotype != NFS4_ACL_WHO_NAMED)
+	if (ace->whotype != NFS4_ACL_WHO_NAMED) {
+		/* RFC 8881 6.2.1.5 */
+		ace->flag &= ~NFS4_ACE_IDENTIFIER_GROUP;
 		status = nfs_ok;
-	else if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
+	} else if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
 		status = nfsd_map_name_to_gid(argp->rqstp,
 				(char *)p, length, &ace->who_gid);
 	else
