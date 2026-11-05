@@ -21,6 +21,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qy --no-install-recommends tshark tcpdump
           sudo apt-get install -qy --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev dwarves \
             python3-pip qemu-system-x86 nfs-kernel-server acl nfs4-acl-tools rdma-core ibverbs-utils
@@ -30,7 +31,9 @@ jobs:
       - name: Configure
         run: |
           vng --kconfig $(sed -e '/^#/d' -e '/^$/d' -e 's/^/--configitem /' .github/ci/kconfig)
+          ./scripts/config -d TMPFS_POSIX_ACL
           make -s olddefconfig
+          ! grep -q '^CONFIG_TMPFS_POSIX_ACL=y' .config
           missing=0
           for item in $(grep -v '^#' .github/ci/kconfig); do
             grep -qx "$item" .config || { echo "not set: $item"; missing=1; }
