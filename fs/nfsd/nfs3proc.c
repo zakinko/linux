@@ -1019,9 +1019,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
 		goto out;
 	}
 
-	if (!IS_POSIXACL(inode))
-		iattrs->ia_mode &= ~current_umask();
-
 	status = fh_fill_pre_attrs(dirfhp);
 	if (status != nfs_ok)
 		goto out;
