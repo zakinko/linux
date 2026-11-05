@@ -38,7 +38,17 @@ print("MEASURE: umask %03o mode %04o" % (um, got))
 print("%s: umask %03o perm %03o, want %03o" %
       ("PASS" if got & 0o777 == want else "FAIL", um, got & 0o777, want))
 P
+T=/sys/kernel/tracing
+mount -t tracefs nodev $T 2>/dev/null
+echo 'p:vc vfs_create mode=%dx:x32' > $T/kprobe_events
+echo 'p:ec ext4_create mode=%cx:x32' >> $T/kprobe_events
+echo 1 > $T/events/kprobes/enable
+mkdir $B/srv/nog; chmod 0777 $B/srv/nog
 python3 -I $B/c.py $B/m 000 775
 python3 -I $B/c.py $B/m 022 755
 python3 -I $B/c.py $B/m 010 765
+python3 -I $B/c.py $B/m/nog 000 775
+python3 -I $B/c.py $B/m/nog 010 765
+echo 0 > $T/events/kprobes/enable
+grep -E 'vc:|ec:' $T/trace | sed 's/^/TRACE: /'
 umount $B/m
