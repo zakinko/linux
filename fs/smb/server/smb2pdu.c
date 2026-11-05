@@ -14,6 +14,8 @@
 #include <linux/ethtool.h>
 #include <linux/falloc.h>
 #include <linux/mount.h>
+#include <linux/xattr.h>
+#include <linux/nfs4_acl.h>
 #include <linux/filelock.h>
 #include <linux/fileattr.h>
 #include <linux/math.h>
@@ -8301,11 +8303,25 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 		return rc;
 	}
 
-	if (test_share_config_flag(work->tcon->share_conf,
-				   KSMBD_SHARE_FLAG_ACL_XATTR))
+	if (IS_NFS4ACL(inode)) {
+		fattr.cf_nfs4acl = vfs_get_nfs4_acl(fp->filp->f_path.dentry,
+						    NFS4ACL_ACL);
+		if (IS_ERR(fattr.cf_nfs4acl)) {
+			rc = PTR_ERR(fattr.cf_nfs4acl);
+			fattr.cf_nfs4acl = NULL;
+			goto release_acl;
+		}
+		/* An empty DACL denies everyone: the mode says more. */
+		if (!fattr.cf_nfs4acl->naces) {
+			kfree(fattr.cf_nfs4acl);
+			fattr.cf_nfs4acl = NULL;
+		}
+	} else if (test_share_config_flag(work->tcon->share_conf,
+					  KSMBD_SHARE_FLAG_ACL_XATTR)) {
 		ppntsd_size = ksmbd_vfs_get_sd_xattr(work->conn, idmap,
 						     fp->filp->f_path.dentry,
 						     &ppntsd);
+	}
 
 	/* Check if sd buffer size exceeds response buffer size */
 	max_len = smb2_calc_max_out_buf_len(work,
@@ -8335,6 +8351,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 release_acl:
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
+	kfree(fattr.cf_nfs4acl);
 	kfree(ppntsd);
 	ksmbd_fd_put(work, fp);
 
