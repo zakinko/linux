@@ -103,6 +103,7 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 /* Asked of ->permission only, and only where IS_NFS4ACL(). */
 #define MAY_WRITE_ACL		0x00000100
 #define MAY_WRITE_OWNER		0x00000200
+#define MAY_WRITE_TIMES		0x00000400
 
 /*
  * flags in file.f_mode.  Note that FMODE_READ and FMODE_WRITE must correspond

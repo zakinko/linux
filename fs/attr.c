@@ -239,7 +239,8 @@ int setattr_prepare(struct mnt_idmap *idmap, struct dentry *dentry,
 
 	/* Check for setting the inode time. */
 	if (ia_valid & (ATTR_MTIME_SET | ATTR_ATIME_SET | ATTR_TIMES_SET)) {
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(idmap, inode) &&
+		    !nfs4_acl_grants(idmap, inode, MAY_WRITE_TIMES))
 			return -EPERM;
 	}
 
