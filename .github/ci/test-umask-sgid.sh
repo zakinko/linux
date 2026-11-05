@@ -1,5 +1,5 @@
 #!/bin/sh
-# Order of the setgid and umask stripping on a filesystem without POSIX ACLs.
+# Order of the setgid and umask stripping on tmpfs built without POSIX ACLs.
 # The client is root and so keeps S_ISGID; root_squash makes the server a
 # non-member of the directory's group, so the server decides.  Prints the modes
 # for comparison between trees; only mode bits other than S_ISGID are judged.
@@ -9,10 +9,8 @@ B=/run/nfsg
 mkdir -p $B
 mount -t tmpfs tmpfs $B
 mkdir $B/srv $B/m
-truncate -s 64M $B/img
-mkfs.ext4 -q -F -O ^orphan_file,^metadata_csum_seed,^metadata_csum $B/img
-mount -t ext4 -o loop $B/img $B/srv || { dmesg | tail -8 | sed 's/^/DMESG: /'; echo "FAIL: ext4"; exit 1; }
-grep " $B/srv " /proc/mounts
+mount -t tmpfs -o mode=0777 tmpfs $B/srv
+grep "POSIX_ACL" /proc/config.gz 2>/dev/null
 chgrp 2000 $B/srv
 chmod 2777 $B/srv
 
@@ -41,9 +39,12 @@ P
 T=/sys/kernel/tracing
 mount -t tracefs nodev $T 2>/dev/null
 echo 'p:vc vfs_create mode=%dx:x32' > $T/kprobe_events
-echo 'p:ec ext4_create mode=%cx:x32' >> $T/kprobe_events
+echo 'p:ec shmem_create mode=%cx:x32' >> $T/kprobe_events
 echo 1 > $T/events/kprobes/enable
 mkdir $B/srv/nog; chmod 0777 $B/srv/nog
+tcpdump -q -i lo -s0 -w $B/p.cap port 2049 2>/dev/null &
+TD=$!
+sleep 1
 python3 -I $B/c.py $B/m 000 775
 python3 -I $B/c.py $B/m 022 755
 python3 -I $B/c.py $B/m 010 765
@@ -51,4 +52,8 @@ python3 -I $B/c.py $B/m/nog 000 775
 python3 -I $B/c.py $B/m/nog 010 765
 echo 0 > $T/events/kprobes/enable
 grep -E 'vc:|ec:' $T/trace | sed 's/^/TRACE: /'
+sleep 1
+kill $TD; sleep 1
+tshark -r $B/p.cap -Y 'nfs' -T fields -e frame.number -e nfs.main_opcode -e nfs.opcode -e nfs.name -e nfs.mode3 -e nfs.attr 2>/dev/null | sed 's/^/WIRE: /' | head -60
+tshark -r $B/p.cap -d tcp.port==2049,rpc -Y 'nfs.opcode == 18 || nfs.main_opcode == 18' -V 2>/dev/null | grep -E '^Frame |Status: |umask: |mode: 0|Name: f\.' | cut -c1-70 | sed 's/^/WIRE2: /' | head -260
 umount $B/m
