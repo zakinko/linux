@@ -57,5 +57,5 @@ grep -E 'vc:|ec:' $T/trace | sed 's/^/TRACE: /'
 sleep 1
 kill $TD; sleep 1
 tshark -r $B/p.cap -Y 'nfs' -T fields -e frame.number -e nfs.main_opcode -e nfs.opcode -e nfs.name -e nfs.mode3 -e nfs.attr 2>/dev/null | sed 's/^/WIRE: /' | head -60
-tshark -r $B/p.cap -Y 'nfs.opcode == 18 || nfs.opcode == 34' -V 2>/dev/null | grep -E 'Opcode:|mode:|mode_umask|umask|Attr mask|createmode|\.name|Name:' | sed 's/^/WIRE2: /' | head -80
+tshark -r $B/p.cap -d tcp.port==2049,rpc -Y 'nfs.opcode == 18 || nfs.main_opcode == 18' -V 2>/dev/null | grep -E '^Frame |Status: |umask: |mode: 0|Name: f\.' | cut -c1-70 | sed 's/^/WIRE2: /' | head -260
 umount $B/m
