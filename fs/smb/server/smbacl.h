@@ -47,6 +47,7 @@ struct smb_fattr {
 	__le32 daccess;
 	struct posix_acl *cf_acls;
 	struct posix_acl *cf_dacls;
+	struct nfs4_acl *cf_nfs4acl;
 };
 
 struct posix_ace_state {
