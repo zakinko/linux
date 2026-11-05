@@ -23,7 +23,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -qy --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev dwarves \
-            python3-pip qemu-system-x86 nfs-kernel-server acl nfs4-acl-tools rdma-core ibverbs-utils
+            python3-pip qemu-system-x86 nfs-kernel-server acl nfs4-acl-tools rdma-core ibverbs-utils ksmbd-tools smbclient
           sudo pip3 install --break-system-packages virtme-ng
           sudo chmod 666 /dev/kvm
 

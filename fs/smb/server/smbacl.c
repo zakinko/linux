@@ -11,6 +11,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/mnt_idmapping.h>
+#include <linux/nfs4.h>
+#include <linux/nfs4_acl.h>
 
 #include "smbacl.h"
 #include "smb_common.h"
@@ -816,6 +818,88 @@ next_ace:
 	pndacl->size = cpu_to_le16(le16_to_cpu(pndacl->size) + size);
 }
 
+/*
+ * RFC 8881 6.2.1.3 and 6.2.1.4 take the mask and flag values from the NT
+ * security descriptor, except for the inherited flag.  A principal given as a
+ * string has no SID and is left out; the filesystem still enforces its ACE.
+ */
+#define NFS4_ACE_TO_NT_MASK	0x001f01ff
+#define NFS4_ACE_TO_NT_FLAGS	(NFS4_ACE_FILE_INHERIT_ACE | \
+				 NFS4_ACE_DIRECTORY_INHERIT_ACE | \
+				 NFS4_ACE_NO_PROPAGATE_INHERIT_ACE | \
+				 NFS4_ACE_INHERIT_ONLY_ACE)
+
+static void set_nfs4_acl_dacl(const struct mnt_idmap *idmap,
+			      struct smb_acl *pndacl, struct smb_fattr *fattr,
+			      const struct smb_sid *owner,
+			      const struct smb_sid *group)
+{
+	struct smb_ace *pace;
+	struct smb_sid sid;
+	const struct smb_sid *psid;
+	u16 num_aces = 0;
+	u32 i;
+	int size = 0;
+
+	pace = (struct smb_ace *)((char *)pndacl + sizeof(struct smb_acl));
+	for (i = 0; i < fattr->cf_nfs4acl->naces; i++) {
+		const struct nfs4_ace *ace = &fattr->cf_nfs4acl->aces[i];
+		u8 flags = ace->flag & NFS4_ACE_TO_NT_FLAGS;
+		vfsuid_t vfsuid;
+		vfsgid_t vfsgid;
+
+		if (ace->type != NFS4_ACE_ACCESS_ALLOWED_ACE_TYPE &&
+		    ace->type != NFS4_ACE_ACCESS_DENIED_ACE_TYPE)
+			continue;
+
+		switch (ace->whotype) {
+		case NFS4_ACL_WHO_OWNER:
+			psid = owner;
+			break;
+		case NFS4_ACL_WHO_GROUP:
+			psid = group;
+			break;
+		case NFS4_ACL_WHO_EVERYONE:
+			psid = &sid_everyone;
+			break;
+		case NFS4_ACL_WHO_NAMED:
+			if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP) {
+				vfsgid = make_vfsgid(idmap, &init_user_ns,
+						     ace->who_gid);
+				id_to_sid(from_kgid(&init_user_ns,
+						    vfsgid_into_kgid(vfsgid)),
+					  SIDUNIX_GROUP, &sid);
+			} else {
+				vfsuid = make_vfsuid(idmap, &init_user_ns,
+						     ace->who_uid);
+				id_to_sid(from_kuid(&init_user_ns,
+						    vfsuid_into_kuid(vfsuid)),
+					  SIDOWNER, &sid);
+			}
+			psid = &sid;
+			break;
+		default:
+			continue;
+		}
+
+		if (ace->flag & NFS4_ACE_INHERITED_ACE)
+			flags |= INHERITED_ACE;
+		pace->type = ace->type == NFS4_ACE_ACCESS_DENIED_ACE_TYPE ?
+			     ACCESS_DENIED : ACCESS_ALLOWED;
+		pace->flags = flags;
+		pace->access_req = cpu_to_le32(ace->access_mask &
+					       NFS4_ACE_TO_NT_MASK);
+		smb_copy_sid(&pace->sid, psid);
+		pace->size = cpu_to_le16(1 + 1 + 2 + 4 + 1 + 1 + 6 +
+					 (pace->sid.num_subauth * 4));
+		size += le16_to_cpu(pace->size);
+		pace = (struct smb_ace *)((char *)pace + le16_to_cpu(pace->size));
+		num_aces++;
+	}
+	pndacl->num_aces = cpu_to_le16(num_aces);
+	pndacl->size = cpu_to_le16(le16_to_cpu(pndacl->size) + size);
+}
+
 static void set_mode_dacl(const struct mnt_idmap *idmap,
 			  struct smb_acl *pndacl, struct smb_fattr *fattr)
 {
@@ -1017,7 +1101,14 @@ size_t smb_acl_sec_desc_scratch_len(struct smb_fattr *fattr,
 			return 0;
 	}
 
-	if (fattr->cf_acls) {
+	if (fattr->cf_nfs4acl) {
+		/* The size of a DACL is 16 bits and an ACE cannot be dropped. */
+		if (check_mul_overflow((size_t)fattr->cf_nfs4acl->naces,
+				       sizeof(struct smb_ace), &tmp) ||
+		    tmp > U16_MAX - sizeof(struct smb_acl) ||
+		    check_add_overflow(len, tmp, &len))
+			return 0;
+	} else if (fattr->cf_acls) {
 		if (check_mul_overflow((size_t)fattr->cf_acls->a_count,
 					2 * sizeof(struct smb_ace), &tmp) ||
 		    check_add_overflow(len, tmp, &len))
@@ -1099,7 +1190,10 @@ int build_sec_desc(const struct mnt_idmap *idmap,
 		dacl_ptr->size = cpu_to_le16(sizeof(struct smb_acl));
 		dacl_ptr->num_aces = 0;
 
-		if (!ppntsd) {
+		if (fattr->cf_nfs4acl) {
+			set_nfs4_acl_dacl(idmap, dacl_ptr, fattr,
+					  nowner_sid_ptr, ngroup_sid_ptr);
+		} else if (!ppntsd) {
 			set_mode_dacl(idmap, dacl_ptr, fattr);
 		} else {
 			struct smb_acl *ppdacl_ptr;
