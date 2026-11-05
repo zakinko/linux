@@ -359,9 +359,6 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 			dput(child);
 	}
 
-	if (!IS_POSIXACL(d_inode(parent.dentry)))
-		iap->ia_mode &= ~current_umask();
-
 	/*
 	 * For the EXCLUSIVE modes we do our own uniqueness tests
 	 * so don't want O_EXCL.
