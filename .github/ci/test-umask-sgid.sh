@@ -44,6 +44,9 @@ echo 'p:vc vfs_create mode=%dx:x32' > $T/kprobe_events
 echo 'p:ec ext4_create mode=%cx:x32' >> $T/kprobe_events
 echo 1 > $T/events/kprobes/enable
 mkdir $B/srv/nog; chmod 0777 $B/srv/nog
+tcpdump -q -i lo -s0 -w $B/p.cap port 2049 2>/dev/null &
+TD=$!
+sleep 1
 python3 -I $B/c.py $B/m 000 775
 python3 -I $B/c.py $B/m 022 755
 python3 -I $B/c.py $B/m 010 765
@@ -51,4 +54,8 @@ python3 -I $B/c.py $B/m/nog 000 775
 python3 -I $B/c.py $B/m/nog 010 765
 echo 0 > $T/events/kprobes/enable
 grep -E 'vc:|ec:' $T/trace | sed 's/^/TRACE: /'
+sleep 1
+kill $TD; sleep 1
+tshark -r $B/p.cap -Y 'nfs' -T fields -e frame.number -e nfs.main_opcode -e nfs.opcode -e nfs.name -e nfs.mode3 -e nfs.attr 2>/dev/null | sed 's/^/WIRE: /' | head -60
+tshark -r $B/p.cap -Y 'nfs.opcode == 18 || nfs.opcode == 34' -V 2>/dev/null | grep -E 'Opcode:|mode:|mode_umask|umask|Attr mask|createmode|\.name|Name:' | sed 's/^/WIRE2: /' | head -80
 umount $B/m
