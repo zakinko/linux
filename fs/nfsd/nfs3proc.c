@@ -901,7 +901,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
 	struct dentry *parent, *child, *mnt_child;
 	struct svc_export *exp;
 	__u32 v_mtime, v_atime;
-	struct inode *inode;
 	struct nfsd_attrs nattrs = {
 		.na_iattr	= iattrs,
 	};
@@ -935,7 +934,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
 		return status;
 
 	parent = dirfhp->fh_dentry;
-	inode = d_inode(parent);
 
 	host_err = fh_want_write(dirfhp);
 	if (host_err)
@@ -1018,9 +1016,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
 		}
 		goto out;
 	}
-
-	if (!IS_POSIXACL(inode))
-		iattrs->ia_mode &= ~current_umask();
 
 	status = fh_fill_pre_attrs(dirfhp);
 	if (status != nfs_ok)

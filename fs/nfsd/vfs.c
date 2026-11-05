@@ -2034,9 +2034,6 @@ nfsd_create_locked(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		iap->ia_mode = 0;
 	iap->ia_mode = (iap->ia_mode & S_IALLUGO) | type;
 
-	if (!IS_POSIXACL(dirp))
-		iap->ia_mode &= ~current_umask();
-
 	err = 0;
 	switch (type) {
 	case S_IFREG:
