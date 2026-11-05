@@ -1839,6 +1839,7 @@ static struct nfs4_acl *dacl_to_nfs4_acl(const struct mnt_idmap *idmap,
 	struct smb_acl *dacl;
 	char *pos;
 	u16 num_aces, i;
+	uid_t uid;
 	int rc;
 
 	if (!(le16_to_cpu(pntsd->type) & DACL_PRESENT) || !dacloffset)
@@ -1857,9 +1858,10 @@ static struct nfs4_acl *dacl_to_nfs4_acl(const struct mnt_idmap *idmap,
 		return ERR_PTR(-ENOMEM);
 	acl->naces = num_aces;
 
-	id_to_sid(from_kuid(&init_user_ns,
-			    vfsuid_into_kuid(i_uid_into_vfsuid(idmap, inode))),
-		  SIDOWNER, &owner);
+	uid = from_kuid(&init_user_ns,
+			vfsuid_into_kuid(i_uid_into_vfsuid(idmap, inode)));
+	/* as build_sec_desc() names the owner */
+	id_to_sid(uid, uid ? SIDOWNER : SIDUNIX_USER, &owner);
 	id_to_sid(from_kgid(&init_user_ns,
 			    vfsgid_into_kgid(i_gid_into_vfsgid(idmap, inode))),
 		  SIDUNIX_GROUP, &group);
@@ -1947,6 +1949,16 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 		rc = -EOPNOTSUPP;
 		goto out;
 	}
+
+	/*
+	 * A client sends the owner and group back with the DACL.  With WRITE_ACL
+	 * granted by an NFSv4 ACL it need not be the owner, so a chown to the
+	 * same ids must not stand in the way.
+	 */
+	if (nfs4acl && uid_eq(fattr.cf_uid, inode->i_uid))
+		fattr.cf_uid = INVALID_UID;
+	if (nfs4acl && gid_eq(fattr.cf_gid, inode->i_gid))
+		fattr.cf_gid = INVALID_GID;
 
 	newattrs.ia_valid = ATTR_CTIME;
 	if (!uid_eq(fattr.cf_uid, INVALID_UID)) {
