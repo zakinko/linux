@@ -266,6 +266,60 @@ static void shmem_inode_unacct_blocks(struct inode *inode, long pages)
 }
 
 static const struct super_operations shmem_ops;
+
+/* CI only: a filesystem that keeps NFSv4 ACLs, so that nfsd has one to serve. */
+#include <linux/nfs4.h>
+#include <linux/moduleparam.h>
+static int shmem_nfs4acl;
+core_param(shmem_nfs4acl, shmem_nfs4acl, int, 0644);
+static DEFINE_XARRAY(shmem_nfs4acls);
+
+static struct nfs4_acl *shmem_acl_dup(const struct nfs4_acl *acl)
+{
+	size_t size = struct_size(acl, aces, acl->naces);
+	struct nfs4_acl *new;
+	char *strs;
+	u32 i;
+
+	for (i = 0; i < acl->naces; i++)
+		if (acl->aces[i].whotype == NFS4_ACL_WHO_STRING)
+			size += acl->aces[i].who_strlen;
+	new = kmalloc(size, GFP_KERNEL);
+	if (!new)
+		return NULL;
+	memcpy(new, acl, struct_size(acl, aces, acl->naces));
+	strs = (char *)&new->aces[acl->naces];
+	for (i = 0; i < acl->naces; i++) {
+		if (acl->aces[i].whotype != NFS4_ACL_WHO_STRING)
+			continue;
+		new->aces[i].who_str = memcpy(strs, acl->aces[i].who_str,
+					      acl->aces[i].who_strlen);
+		strs += acl->aces[i].who_strlen;
+	}
+	return new;
+}
+
+static struct nfs4_acl *shmem_get_nfs4_acl(struct dentry *dentry,
+					   enum nfs4_acl_type type)
+{
+	unsigned long key = d_inode(dentry)->i_ino * 4 + type;
+	struct nfs4_acl *acl = xa_load(&shmem_nfs4acls, key);
+
+	acl = acl ? shmem_acl_dup(acl) : kzalloc(sizeof(*acl), GFP_KERNEL);
+	return acl ?: ERR_PTR(-ENOMEM);
+}
+
+static int shmem_set_nfs4_acl(struct dentry *dentry, enum nfs4_acl_type type,
+			      const struct nfs4_acl *acl)
+{
+	unsigned long key = d_inode(dentry)->i_ino * 4 + type;
+	struct nfs4_acl *new = shmem_acl_dup(acl);
+
+	if (!new)
+		return -ENOMEM;
+	kfree(xa_store(&shmem_nfs4acls, key, new, GFP_KERNEL));
+	return 0;
+}
 static const struct address_space_operations shmem_aops;
 static const struct file_operations shmem_file_operations;
 static const struct inode_operations shmem_inode_operations;
@@ -5252,6 +5306,8 @@ static int shmem_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_blocksize_bits = PAGE_SHIFT;
 	sb->s_magic = TMPFS_MAGIC;
 	sb->s_op = &shmem_ops;
+	if (shmem_nfs4acl)
+		sb->s_iflags |= SB_I_NFS4ACL | SB_I_NFS41ACL;
 	sb->s_time_gran = 1;
 #ifdef CONFIG_TMPFS_XATTR
 	sb->s_xattr = shmem_xattr_handlers;
@@ -5405,6 +5461,8 @@ static const struct file_operations shmem_file_operations = {
 };
 
 static const struct inode_operations shmem_inode_operations = {
+	.get_nfs4_acl	= shmem_get_nfs4_acl,
+	.set_nfs4_acl	= shmem_set_nfs4_acl,
 	.getattr	= shmem_getattr,
 	.setattr	= shmem_setattr,
 #ifdef CONFIG_TMPFS_XATTR
@@ -5416,6 +5474,8 @@ static const struct inode_operations shmem_inode_operations = {
 };
 
 static const struct inode_operations shmem_dir_inode_operations = {
+	.get_nfs4_acl	= shmem_get_nfs4_acl,
+	.set_nfs4_acl	= shmem_set_nfs4_acl,
 #ifdef CONFIG_TMPFS
 	.getattr	= shmem_getattr,
 	.create		= shmem_create,
