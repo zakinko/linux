@@ -11,7 +11,7 @@ mount -t tmpfs tmpfs $B
 mkdir $B/srv $B/m
 truncate -s 64M $B/img
 mkfs.ext4 -q -F -O ^orphan_file,^metadata_csum_seed,^metadata_csum $B/img
-mount -t ext4 -o loop,noacl $B/img $B/srv || { dmesg | tail -8 | sed 's/^/DMESG: /'; echo "FAIL: ext4"; exit 1; }
+mount -t ext4 -o loop $B/img $B/srv || { dmesg | tail -8 | sed 's/^/DMESG: /'; echo "FAIL: ext4"; exit 1; }
 grep " $B/srv " /proc/mounts
 chgrp 2000 $B/srv
 chmod 2777 $B/srv
