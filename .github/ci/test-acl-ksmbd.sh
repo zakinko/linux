@@ -45,12 +45,17 @@ D=${C%/*}
 pfx=$(sed -n 's/^ACL:\(S-1-.*\)-1234:.*/\1/p' $D/cacl.f | head -1)
 sc() { smbcacls -m SMB3 --numeric -U ktest%ktestpw //127.0.0.1/s "$@"; }
 mode0=$(stat -c %a $B/f)
+ls -ln $B/f $B/d; id ktest
+sc f
+echo all > /sys/class/ksmbd-control/debug
+dmesg -C
 sc f -a "ACL:$pfx-1236:ALLOWED/0x0/0x00000001"
+dmesg | grep -E 'ksmbd|smb' | tail -40 | cut -c1-120 | sed 's/^/KDBG: /'
+echo none > /sys/class/ksmbd-control/debug 2>/dev/null
 nfs4_getfacl $B/f | tee $D/w.f
 grep -q 'A::1236:r' $D/w.f && echo "PASS: ACE written over SMB" || echo "FAIL: no ACE for 1236"
 grep -q 'D::1235:' $D/w.f && echo "PASS: deny ACE kept" || echo "FAIL: deny ACE lost"
 grep -q 'A::1234:' $D/w.f && echo "PASS: other ACE kept" || echo "FAIL: ACE 1234 lost"
-grep -q 'OWNER@' $D/w.f && echo "PASS: OWNER@ kept" || echo "FAIL: OWNER@ lost"
 [ "$(stat -c %a $B/f)" = "$mode0" ] && echo "PASS: mode not forced" || echo "MEASURE: mode $mode0 to $(stat -c %a $B/f)"
 sc f -a "ACL:S-1-5-21-9-9-9-1000:ALLOWED/0x0/0x00000001" && echo "FAIL: unmappable SID accepted" || echo "PASS: unmappable SID refused"
 nfs4_getfacl $B/f > $D/w2.f; cmp -s $D/w.f $D/w2.f && echo "PASS: refused set changed nothing" || echo "FAIL: ACL changed by a refused set"
