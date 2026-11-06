@@ -91,6 +91,7 @@
 /* These will return ERR_INVAL if specified in GETATTR or READDIR. */
 #define NFSD_WRITEONLY_ATTRS_WORD1 \
 	(FATTR4_WORD1_TIME_ACCESS_SET   | FATTR4_WORD1_TIME_MODIFY_SET)
+#define NFSD_WRITEONLY_ATTRS_WORD2	FATTR4_WORD2_MODE_UMASK
 
 /*
  * These are the only attrs allowed in CREATE/OPEN/SETATTR. Don't add

@@ -4052,6 +4052,7 @@ nfsd4_encode_fattr4(struct svc_rqst *rqstp, struct xdr_stream *xdr,
 	};
 
 	WARN_ON_ONCE(bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1);
+	WARN_ON_ONCE(bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2);
 	WARN_ON_ONCE(!nfsd_attrs_supported(minorversion, bmval));
 
 	args.rqstp = rqstp;
