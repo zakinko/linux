@@ -642,13 +642,15 @@ nfsd4_decode_fattr4(struct nfsd4_compoundargs *argp, u32 *bmval, u32 bmlen,
 		u32 mode, mask;
 
 		if (!umask)
-			return nfserr_bad_xdr;
+			return nfserr_inval;
 		if (xdr_stream_decode_u32(argp->xdr, &mode) < 0)
 			return nfserr_bad_xdr;
 		iattr->ia_mode = mode & (S_IFMT | S_IALLUGO);
 		if (xdr_stream_decode_u32(argp->xdr, &mask) < 0)
 			return nfserr_bad_xdr;
-		*umask = mask & S_IRWXUGO;
+		if (mask & ~S_IRWXUGO)
+			return nfserr_inval;
+		*umask = mask;
 		iattr->ia_valid |= ATTR_MODE;
 	}
 	if (bmval[2] & FATTR4_WORD2_TIME_DELEG_ACCESS) {
