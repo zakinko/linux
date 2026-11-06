@@ -13,6 +13,7 @@
 #include <linux/mnt_idmapping.h>
 #include <linux/nfs4.h>
 #include <linux/nfs4_acl.h>
+#include <linux/xattr.h>
 
 #include "smbacl.h"
 #include "smb_common.h"
@@ -1779,6 +1780,138 @@ err_out:
 }
 EXPORT_SYMBOL_IF_KUNIT(smb_check_perm_dacl);
 
+static bool smb_sid_equal(const struct smb_sid *a, const struct smb_sid *b)
+{
+	/* compare_sids() stops at the shorter of the two */
+	return a->num_subauth == b->num_subauth && !compare_sids(a, b);
+}
+
+/*
+ * The SIDs of set_nfs4_acl_dacl() map back to the same who.  There is no
+ * NFSv4 who for any other SID, and leaving one out would drop what a deny
+ * ACE was there to stop, so the caller refuses the whole DACL.
+ */
+static int smb_sid_to_nfs4_who(const struct mnt_idmap *idmap,
+			       struct smb_sid *sid, const struct smb_sid *owner,
+			       const struct smb_sid *group, struct nfs4_ace *ace)
+{
+	struct smb_fattr fattr = {};
+
+	if (smb_sid_equal(sid, &sid_everyone)) {
+		ace->whotype = NFS4_ACL_WHO_EVERYONE;
+	} else if (smb_sid_equal(sid, owner)) {
+		ace->whotype = NFS4_ACL_WHO_OWNER;
+	} else if (smb_sid_equal(sid, group)) {
+		ace->whotype = NFS4_ACL_WHO_GROUP;
+		ace->flag |= NFS4_ACE_IDENTIFIER_GROUP;
+	} else if (!sid_to_id(idmap, sid, SIDOWNER, &fattr)) {
+		ace->whotype = NFS4_ACL_WHO_NAMED;
+		ace->who_uid = fattr.cf_uid;
+	} else if (!sid_to_id(idmap, sid, SIDUNIX_GROUP, &fattr)) {
+		ace->whotype = NFS4_ACL_WHO_NAMED;
+		ace->flag |= NFS4_ACE_IDENTIFIER_GROUP;
+		ace->who_gid = fattr.cf_gid;
+	} else {
+		return -EINVAL;
+	}
+	return 0;
+}
+
+#define SMB_ACE_TO_NFS4_FLAGS	(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | \
+				 NO_PROPAGATE_INHERIT_ACE | INHERIT_ONLY_ACE)
+
+/*
+ * The DACL of @pntsd as an NFSv4 ACL.  Returns NULL when @pntsd has no DACL,
+ * which leaves the ACL of the file as it is.
+ *
+ * An empty DACL is refused: it denies everyone, and build_sec_desc() answers
+ * for an ACL with no ACEs from the mode instead, so it would read back as
+ * something else.
+ */
+static struct nfs4_acl *dacl_to_nfs4_acl(const struct mnt_idmap *idmap,
+					 struct inode *inode,
+					 struct smb_ntsd *pntsd, int acl_len)
+{
+	char *end = (char *)pntsd + acl_len;
+	u32 dacloffset = le32_to_cpu(pntsd->dacloffset);
+	struct smb_sid owner, group;
+	struct nfs4_acl *acl;
+	struct smb_acl *dacl;
+	char *pos;
+	u16 num_aces, i;
+	uid_t uid;
+	int rc;
+
+	if (!(le16_to_cpu(pntsd->type) & DACL_PRESENT) || !dacloffset)
+		return NULL;
+	if (dacloffset < sizeof(struct smb_ntsd) ||
+	    dacloffset > acl_len - sizeof(struct smb_acl))
+		return ERR_PTR(-EINVAL);
+
+	dacl = (struct smb_acl *)((char *)pntsd + dacloffset);
+	num_aces = le16_to_cpu(dacl->num_aces);
+	if (!num_aces)
+		return ERR_PTR(-EINVAL);
+
+	acl = kzalloc_flex(*acl, aces, num_aces, KSMBD_DEFAULT_GFP);
+	if (!acl)
+		return ERR_PTR(-ENOMEM);
+	acl->naces = num_aces;
+
+	uid = from_kuid(&init_user_ns,
+			vfsuid_into_kuid(i_uid_into_vfsuid(idmap, inode)));
+	/* as build_sec_desc() names the owner */
+	id_to_sid(uid, uid ? SIDOWNER : SIDUNIX_USER, &owner);
+	id_to_sid(from_kgid(&init_user_ns,
+			    vfsgid_into_kgid(i_gid_into_vfsgid(idmap, inode))),
+		  SIDUNIX_GROUP, &group);
+
+	rc = -EINVAL;
+	pos = (char *)dacl + sizeof(struct smb_acl);
+	for (i = 0; i < num_aces; i++) {
+		struct smb_ace *pace = (struct smb_ace *)pos;
+		struct nfs4_ace *ace = &acl->aces[i];
+		size_t min_size = offsetof(struct smb_ace, sid) +
+				  offsetof(struct smb_sid, sub_auth);
+		__le32 access;
+		u16 size;
+
+		if (end - pos < min_size)
+			goto err;
+		size = le16_to_cpu(pace->size);
+		if (pace->sid.num_subauth > SID_MAX_SUB_AUTHORITIES ||
+		    end - pos < size ||
+		    size < min_size + pace->sid.num_subauth * sizeof(__le32))
+			goto err;
+
+		if (pace->type == ACCESS_ALLOWED)
+			ace->type = NFS4_ACE_ACCESS_ALLOWED_ACE_TYPE;
+		else if (pace->type == ACCESS_DENIED)
+			ace->type = NFS4_ACE_ACCESS_DENIED_ACE_TYPE;
+		else
+			goto err;
+
+		if (pace->flags & ~(SMB_ACE_TO_NFS4_FLAGS | INHERITED_ACE))
+			goto err;
+		ace->flag = pace->flags & SMB_ACE_TO_NFS4_FLAGS;
+		if (pace->flags & INHERITED_ACE)
+			ace->flag |= NFS4_ACE_INHERITED_ACE;
+
+		access = smb_map_generic_desired_access(pace->access_req);
+		if (le32_to_cpu(access) & ~NFS4_ACE_TO_NT_MASK)
+			goto err;
+		ace->access_mask = le32_to_cpu(access);
+
+		if (smb_sid_to_nfs4_who(idmap, &pace->sid, &owner, &group, ace))
+			goto err;
+		pos += size;
+	}
+	return acl;
+err:
+	kfree(acl);
+	return ERR_PTR(rc);
+}
+
 int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 		 const struct path *path, struct smb_ntsd *pntsd, int ntsd_len,
 		 bool type_check, bool get_write, bool posix_open,
@@ -1789,10 +1922,21 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 	struct inode *inode = d_inode(path->dentry);
 	const struct mnt_idmap *idmap = mnt_idmap(path->mnt);
 	struct iattr newattrs;
+	bool nfs4acl = inode->i_sb->s_iflags & SB_I_NFS4ACL;
+	struct nfs4_acl *nacl = NULL;
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
 	fattr.cf_mode = inode->i_mode;
+
+	if (nfs4acl && dacl_requested) {
+		nacl = dacl_to_nfs4_acl(idmap, inode, pntsd, ntsd_len);
+		if (IS_ERR(nacl)) {
+			rc = PTR_ERR(nacl);
+			nacl = NULL;
+			goto out;
+		}
+	}
 
 	rc = parse_sec_desc(idmap, pntsd, ntsd_len, &fattr);
 	if (rc)
@@ -1806,6 +1950,16 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 		goto out;
 	}
 
+	/*
+	 * A client sends the owner and group back with the DACL.  With WRITE_ACL
+	 * granted by an NFSv4 ACL it need not be the owner, so a chown to the
+	 * same ids must not stand in the way.
+	 */
+	if (nfs4acl && uid_eq(fattr.cf_uid, inode->i_uid))
+		fattr.cf_uid = INVALID_UID;
+	if (nfs4acl && gid_eq(fattr.cf_gid, inode->i_gid))
+		fattr.cf_gid = INVALID_GID;
+
 	newattrs.ia_valid = ATTR_CTIME;
 	if (!uid_eq(fattr.cf_uid, INVALID_UID)) {
 		newattrs.ia_valid |= ATTR_UID;
@@ -1815,17 +1969,23 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 		newattrs.ia_valid |= ATTR_GID;
 		newattrs.ia_gid = fattr.cf_gid;
 	}
-	newattrs.ia_valid |= ATTR_MODE;
-	if (fattr.cf_posix_mode)
-		newattrs.ia_mode = (inode->i_mode & ~07777) |
-				   (fattr.cf_mode & 07777);
-	else
-		newattrs.ia_mode = (inode->i_mode & ~0777) |
-				   (fattr.cf_mode & 0777);
+	/*
+	 * On an NFSv4 ACL the mode is the filesystem's to work out, and a
+	 * chmod would have it rewrite or drop the ACL set below.
+	 */
+	if (!nfs4acl) {
+		newattrs.ia_valid |= ATTR_MODE;
+		if (fattr.cf_posix_mode)
+			newattrs.ia_mode = (inode->i_mode & ~07777) |
+					   (fattr.cf_mode & 07777);
+		else
+			newattrs.ia_mode = (inode->i_mode & ~0777) |
+					   (fattr.cf_mode & 0777);
 
-	ksmbd_vfs_remove_acl_xattrs(idmap, path);
+		ksmbd_vfs_remove_acl_xattrs(idmap, path);
+	}
 	/* Update posix acls */
-	if (IS_ENABLED(CONFIG_FS_POSIX_ACL) && fattr.cf_dacls) {
+	if (!nfs4acl && IS_ENABLED(CONFIG_FS_POSIX_ACL) && fattr.cf_dacls) {
 		rc = set_posix_acl(idmap, path->dentry,
 				   ACL_TYPE_ACCESS, fattr.cf_acls);
 		if (rc < 0)
@@ -1844,6 +2004,9 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 
 	inode_lock(inode);
 	rc = notify_change(idmap, path->dentry, &newattrs, NULL);
+	if (!rc && nacl)
+		rc = vfs_set_nfs4_acl_locked(idmap, path->dentry, NFS4ACL_ACL,
+					     nacl);
 	inode_unlock(inode);
 	if (rc)
 		goto out;
@@ -1860,6 +2023,7 @@ int set_info_sec(struct ksmbd_conn *conn, struct ksmbd_tree_connect *tcon,
 	}
 
 out:
+	kfree(nacl);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
 	return rc;
