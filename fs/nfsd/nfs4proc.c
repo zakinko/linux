@@ -1060,7 +1060,8 @@ nfsd4_getattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 	if (status)
 		return status;
 
-	if (getattr->ga_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
+	if ((getattr->ga_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1) ||
+	    (getattr->ga_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
 		return nfserr_inval;
 
 	getattr->ga_bmval[0] &= nfsd_suppattrs[cstate->minorversion][0];
@@ -1199,7 +1200,8 @@ nfsd4_readdir(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 
 	/* no need to check permission - this will be done in nfsd_readdir() */
 
-	if (readdir->rd_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
+	if ((readdir->rd_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1) ||
+	    (readdir->rd_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
 		return nfserr_inval;
 
 	readdir->rd_bmval[0] &= nfsd_suppattrs[cstate->minorversion][0];
@@ -2739,7 +2741,8 @@ _nfsd4_verify(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
 		return status;
 
 	if ((verify->ve_bmval[0] & FATTR4_WORD0_RDATTR_ERROR)
-	    || (verify->ve_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1))
+	    || (verify->ve_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
+	    || (verify->ve_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
 		return nfserr_inval;
 	if (verify->ve_attrlen & 3)
 		return nfserr_inval;
