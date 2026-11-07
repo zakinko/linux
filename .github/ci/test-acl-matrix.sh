@@ -1,6 +1,8 @@
 #!/bin/sh
-# What ACLs do on each path.  A table to read, so the lines are MATRIX and a
-# cell that does not work is not a broken build.
+# What ACLs do on each path, checked against the table at the end.  The gaps
+# in that table are understood and listed under it; they are kept there so
+# that they cannot change unnoticed.  On the NFSv4 ACL tmpfs only R and W are
+# judged: that filesystem stores ACLs and does not inherit them.
 # R: an ACE set on the server is seen by the client.
 # W: an ACE set by the client reaches the server.
 # I: a file created under an inheritable ACE, umask 077, carries the ACE.
@@ -82,7 +84,11 @@ cell() {
 	(umask 077; : > $3/$d.i/f; : > $3/$d.pl/f)
 	I=no; srv_has $1 $4/$d.i/f 1234 && I=yes
 	U=$(stat -c %a $4/$d.i/f 2>/dev/null)/$(stat -c %a $4/$d.pl/f 2>/dev/null)
-	echo "MATRIX: $5 R=$R W=$W I=$I U=$U"
+	if [ $1 = n ]; then
+		echo "MATRIX: $5 R=$R W=$W" | tee -a $B/rows
+	else
+		echo "MATRIX: $5 R=$R W=$W I=$I U=$U" | tee -a $B/rows
+	fi
 }
 
 for fs in p n; do
@@ -94,7 +100,8 @@ for fs in p n; do
 			echo "MATRIX: $fs direct v$v no mount"
 		fi
 	done
-	for l in 3 4.0 4.1 4.2; do
+	# An NFSv4.0 mount has no export operations (NFS_CAP_ATOMIC_OPEN_V1).
+	for l in 3 4.1 4.2; do
 		for u in 3 4.2; do
 			lo=$B/lo.$fs.$l.$u
 			up=$B/up.$fs.$l.$u
@@ -121,4 +128,34 @@ mount -t overlay overlay -o lowerdir=$B/ov/l,upperdir=$B/ov/u/u,workdir=$B/ov/u/
 	mnt 4.2 $B/ov/m $B/ov/c && cell p 4.2 $B/ov/c $B/ov/m "p overlay v4.2"
 	mnt 3 $B/ov/m $B/ov/c3 && cell p 3 $B/ov/c3 $B/ov/m "p overlay v3"
 } || echo "MATRIX: overlay did not mount"
-echo "PASS: matrix finished"
+cat > $B/want <<'W'
+p direct v3 R=yes W=yes I=yes U=666/600
+p direct v4.0 R=yes W=yes I=yes U=600/600
+p direct v4.1 R=yes W=yes I=yes U=600/600
+p direct v4.2 R=yes W=yes I=yes U=666/600
+p reexport lower v3 upper v3 R=yes W=yes I=yes U=666/600
+p reexport lower v3 upper v4.2 R=yes W=yes I=yes U=666/600
+p reexport lower v4.1 upper v3 R=no W=no I=yes U=600/600
+p reexport lower v4.1 upper v4.2 R=yes W=yes I=yes U=600/600
+p reexport lower v4.2 upper v3 R=no W=no I=yes U=600/600
+p reexport lower v4.2 upper v4.2 R=yes W=yes I=yes U=666/600
+n direct v3 R=no W=no
+n direct v4.0 R=yes W=yes
+n direct v4.1 R=yes W=yes
+n direct v4.2 R=yes W=yes
+n reexport lower v3 upper v3 R=no W=no
+n reexport lower v3 upper v4.2 R=no W=no
+n reexport lower v4.1 upper v3 R=no W=no
+n reexport lower v4.1 upper v4.2 R=yes W=yes
+n reexport lower v4.2 upper v3 R=no W=no
+n reexport lower v4.2 upper v4.2 R=yes W=yes
+p overlay v4.2 R=yes W=yes I=yes U=666/600
+p overlay v3 R=yes W=yes I=yes U=666/600
+W
+# Known gaps in the table above:
+#  v4.0 and v4.1 cannot send the umask (RFC 8275 is v4.2 only), so the client
+#  strips it before a default ACL can override it: 600.
+#  An NFSv3 server cannot carry the ACL of an NFSv4 mount below it, and NFSACL
+#  carries only POSIX ACLs: R=no W=no.
+grep '^MATRIX: ' $B/rows | sed 's/^MATRIX: //' > $B/got
+if diff $B/want $B/got; then echo "PASS: every path as expected"; else echo "FAIL: ACL path table changed"; fi
