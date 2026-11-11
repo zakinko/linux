@@ -1,0 +1,161 @@
+#!/bin/sh
+# What ACLs do on each path, checked against the table at the end.  The gaps
+# in that table are understood and listed under it; they are kept there so
+# that they cannot change unnoticed.  On the NFSv4 ACL tmpfs only R and W are
+# judged: that filesystem stores ACLs and does not inherit them.
+# R: an ACE set on the server is seen by the client.
+# W: an ACE set by the client reaches the server.
+# I: a file created under an inheritable ACE, umask 077, carries the ACE.
+# U: the mode of that file (want 666), and of one with no inheritance (want 600).
+set -u
+uname -r
+B=/run/mx
+mkdir -p $B
+mount -t tmpfs tmpfs /var/lib/nfs
+mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery
+touch /var/lib/nfs/etab /var/lib/nfs/rmtab
+mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs
+mount -t nfsd nfsd /proc/fs/nfsd
+rpcbind -w 2>/dev/null || true
+opts=rw,sync,no_root_squash,insecure,no_subtree_check
+mkdir $B/p $B/n
+mount -t tmpfs -o mode=0777 tmpfs $B/p
+echo 1 > /sys/module/kernel/parameters/shmem_nfs4acl
+mount -t tmpfs -o mode=0777 tmpfs $B/n
+echo 0 > /sys/module/kernel/parameters/shmem_nfs4acl
+exportfs -o $opts,fsid=0,crossmnt 127.0.0.1:$B
+exportfs -o $opts,fsid=1 127.0.0.1:$B/p
+exportfs -o $opts,fsid=2 127.0.0.1:$B/n
+rpc.mountd
+echo 10 > /proc/fs/nfsd/nfsv4leasetime
+echo 10 > /proc/fs/nfsd/nfsv4gracetime
+rpc.nfsd 8
+sleep 15
+
+fsid=10
+seq=0
+
+# Mount <vers> <export path> <mount point>
+mnt() {
+	mkdir -p $3
+	case $1 in
+	3) timeout 30 mount -t nfs -o vers=3,nolock,actimeo=0 127.0.0.1:$2 $3 ;;
+	*) timeout 30 mount -t nfs -o vers=$1,nolock,actimeo=0 127.0.0.1:${2#$B} $3 ;;
+	esac 2>/dev/null
+}
+
+# srv_set <fs> <file> <id> <flags>
+srv_set() {
+	if [ $1 = p ]; then
+		if [ -n "${4:-}" ]; then
+			setfacl -d -m u::rwx,g::rwx,o::rwx,u:$3:rwx $2
+		else
+			setfacl -m u:$3:rw $2
+		fi
+	else
+		nfs4_setfacl -a A:${4:-}:$3:rw $2
+		[ -z "${4:-}" ] || nfs4_setfacl -a A:$4:EVERYONE@:rwaxtTnNcCy $2
+	fi
+}
+srv_has() {
+	if [ $1 = p ]; then getfacl -cn $2 2>/dev/null | grep -q "user:$3:"
+	else nfs4_getfacl $2 2>/dev/null | grep -q ":$3:"; fi
+}
+cl_has() {
+	if [ $1 = 3 ]; then getfacl -cn $2 2>/dev/null | grep -q "user:$3:"
+	else nfs4_getfacl $2 2>/dev/null | grep -q ":$3:"; fi
+}
+cl_set() {
+	if [ $1 = 3 ]; then setfacl -m u:$3:rw $2 2>/dev/null
+	else nfs4_setfacl -a A::$3:rw $2 2>/dev/null; fi
+}
+
+# cell <fs> <client vers> <client dir> <server dir> <label>
+cell() {
+	seq=$((seq + 1))
+	d=t$seq
+	mkdir -m 777 $4/$d $4/$d.i $4/$d.pl
+	: > $4/$d/r; chmod 644 $4/$d/r
+	: > $4/$d/w; chmod 644 $4/$d/w
+	srv_set $1 $4/$d/r 1234
+	srv_set $1 $4/$d.i 1234 fd
+	R=no; cl_has $2 $3/$d/r 1234 && R=yes
+	W=no; cl_set $2 $3/$d/w 1235 && srv_has $1 $4/$d/w 1235 && W=yes
+	(umask 077; : > $3/$d.i/f; : > $3/$d.pl/f)
+	I=no; srv_has $1 $4/$d.i/f 1234 && I=yes
+	U=$(stat -c %a $4/$d.i/f 2>/dev/null)/$(stat -c %a $4/$d.pl/f 2>/dev/null)
+	if [ $1 = n ]; then
+		echo "MATRIX: $5 R=$R W=$W" | tee -a $B/rows
+	else
+		echo "MATRIX: $5 R=$R W=$W I=$I U=$U" | tee -a $B/rows
+	fi
+}
+
+for fs in p n; do
+	for v in 3 4.0 4.1 4.2; do
+		m=$B/m.$fs.$v
+		if mnt $v $B/$fs $m; then
+			cell $fs $v $m $B/$fs "$fs direct v$v"
+		else
+			echo "MATRIX: $fs direct v$v no mount"
+		fi
+	done
+	# An NFSv4.0 mount has no export operations (NFS_CAP_ATOMIC_OPEN_V1).
+	for l in 3 4.1 4.2; do
+		for u in 3 4.2; do
+			lo=$B/lo.$fs.$l.$u
+			up=$B/up.$fs.$l.$u
+			mnt $l $B/$fs $lo || { echo "MATRIX: $fs lower v$l no mount"; continue; }
+			fsid=$((fsid + 1))
+			exportfs -o $opts,fsid=$fsid,crossmnt 127.0.0.1:$lo
+			if mnt $u $lo $up; then
+				cell $fs $u $up $B/$fs "$fs reexport lower v$l upper v$u"
+			else
+				echo "MATRIX: $fs reexport lower v$l upper v$u no mount"
+			fi
+		done
+	done
+done
+
+# overlayfs over a POSIX ACL tmpfs, exported.
+mkdir $B/ov $B/ov/l $B/ov/u $B/ov/w $B/ov/m
+mount -t tmpfs tmpfs $B/ov/u
+mkdir $B/ov/u/u $B/ov/u/w
+mount -t overlay overlay -o lowerdir=$B/ov/l,upperdir=$B/ov/u/u,workdir=$B/ov/u/w,nfs_export=on,index=on \
+    $B/ov/m 2>/dev/null && {
+	chmod 777 $B/ov/m
+	exportfs -o $opts,fsid=90 127.0.0.1:$B/ov/m
+	mnt 4.2 $B/ov/m $B/ov/c && cell p 4.2 $B/ov/c $B/ov/m "p overlay v4.2"
+	mnt 3 $B/ov/m $B/ov/c3 && cell p 3 $B/ov/c3 $B/ov/m "p overlay v3"
+} || echo "MATRIX: overlay did not mount"
+cat > $B/want <<'W'
+p direct v3 R=yes W=yes I=yes U=666/600
+p direct v4.0 R=yes W=yes I=yes U=600/600
+p direct v4.1 R=yes W=yes I=yes U=600/600
+p direct v4.2 R=yes W=yes I=yes U=666/600
+p reexport lower v3 upper v3 R=yes W=yes I=yes U=666/600
+p reexport lower v3 upper v4.2 R=yes W=yes I=yes U=666/600
+p reexport lower v4.1 upper v3 R=no W=no I=yes U=600/600
+p reexport lower v4.1 upper v4.2 R=yes W=yes I=yes U=600/600
+p reexport lower v4.2 upper v3 R=no W=no I=yes U=600/600
+p reexport lower v4.2 upper v4.2 R=yes W=yes I=yes U=666/600
+n direct v3 R=no W=no
+n direct v4.0 R=yes W=yes
+n direct v4.1 R=yes W=yes
+n direct v4.2 R=yes W=yes
+n reexport lower v3 upper v3 R=no W=no
+n reexport lower v3 upper v4.2 R=no W=no
+n reexport lower v4.1 upper v3 R=no W=no
+n reexport lower v4.1 upper v4.2 R=yes W=yes
+n reexport lower v4.2 upper v3 R=no W=no
+n reexport lower v4.2 upper v4.2 R=yes W=yes
+p overlay v4.2 R=yes W=yes I=yes U=666/600
+p overlay v3 R=yes W=yes I=yes U=666/600
+W
+# Known gaps in the table above:
+#  v4.0 and v4.1 cannot send the umask (RFC 8275 is v4.2 only), so the client
+#  strips it before a default ACL can override it: 600.
+#  An NFSv3 server cannot carry the ACL of an NFSv4 mount below it, and NFSACL
+#  carries only POSIX ACLs: R=no W=no.
+grep '^MATRIX: ' $B/rows | sed 's/^MATRIX: //' > $B/got
+if diff $B/want $B/got; then echo "PASS: every path as expected"; else echo "FAIL: ACL path table changed"; fi
