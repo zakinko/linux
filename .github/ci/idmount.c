@@ -68,10 +68,12 @@ int main(int argc, char **argv)
 	if (read(ready[0], &c, 1) != 0)
 		die("ready");
 	/*
-	 * uid_map lines are "inside outside count"; the mount shows the inside
-	 * id for the outside (filesystem) one.
+	 * uid_map lines are "inside outside count".  For an idmapped mount the
+	 * inside id is the filesystem's and the outside one is what the mount
+	 * shows: with "100000 0 65536" a file of uid 1234 appeared as the
+	 * overflow uid.
 	 */
-	snprintf(map, sizeof(map), "%s %s %s\n", argv[4], argv[3], argv[5]);
+	snprintf(map, sizeof(map), "%s %s %s\n", argv[3], argv[4], argv[5]);
 	put(pid, "setgroups", "deny");
 	put(pid, "uid_map", map);
 	put(pid, "gid_map", map);
