@@ -8,8 +8,9 @@ mkdir -p $B/fs $B/m
 echo 1 > /sys/module/kernel/parameters/shmem_nfs4acl
 mount -t tmpfs -o mode=0777 tmpfs $B/fs
 echo 0 > /sys/module/kernel/parameters/shmem_nfs4acl
-mount --bind -o X-mount.idmap=b:0:100000:65536 $B/fs $B/m ||
-	{ echo "FAIL: idmapped mount"; exit 1; }
+# libmount's X-mount.idmap failed here with ENOENT; make the mount directly.
+cc -O -Wall -o $B/idmount $(dirname $0)/idmount.c || { echo "FAIL: cc"; exit 1; }
+$B/idmount $B/fs $B/m 0 100000 65536 || { echo "FAIL: idmapped mount"; exit 1; }
 grep " $B/m " /proc/self/mountinfo
 
 # What the mount shows for fs uids 1234 and 1235.
