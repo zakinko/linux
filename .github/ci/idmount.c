@@ -38,7 +38,7 @@ int main(int argc, char **argv)
 {
 	struct mount_attr attr = { .attr_set = MOUNT_ATTR_IDMAP };
 	char map[64], path[64];
-	int pipefd[2], tree, ns;
+	int pipefd[2], ready[2], tree, ns;
 	pid_t pid;
 	char c;
 
@@ -46,7 +46,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: idmount src dst fs-id mount-id count\n");
 		return 2;
 	}
-	if (pipe(pipefd))
+	if (pipe(pipefd) || pipe(ready))
 		die("pipe");
 	pid = fork();
 	if (pid < 0)
@@ -56,10 +56,17 @@ int main(int argc, char **argv)
 		if (unshare(CLONE_NEWUSER))
 			die("unshare");
 		close(pipefd[1]);
-		read(pipefd[0], &c, 1);
+		close(ready[0]);
+		close(ready[1]);
+		if (read(pipefd[0], &c, 1) < 0)
+			_exit(1);
 		_exit(0);
 	}
 	close(pipefd[0]);
+	/* The maps can be written only once the child has unshared. */
+	close(ready[1]);
+	if (read(ready[0], &c, 1) != 0)
+		die("ready");
 	/*
 	 * uid_map lines are "inside outside count"; the mount shows the inside
 	 * id for the outside (filesystem) one.
