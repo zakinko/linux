@@ -1,0 +1,62 @@
+From e886444223965abe98b324c7933e59091d6d01f3 Mon Sep 17 00:00:00 2001
+From: Showta Ishizaki <zakinko@snowrabbit.org>
+Date: Fri, 6 Nov 2026 12:35:09 +0900
+Subject: [PATCH 1/4] nfsd: leave the umask to the VFS in NFSv4 creates
+
+Since commit 5aa8fd9cea2e ("fs: add a new SB_I_NOUMASK flag"), an NFSv4
+mount sets SB_I_NOUMASK instead of SB_POSIXACL, which tells the VFS to
+leave the umask to the filesystem. nfsd only looks at IS_POSIXACL(), so
+when an NFSv4.2 mount is re-exported it strips the umask before
+forwarding the create, and a default ACL on the directory underneath can
+no longer override it.
+
+nfsd does not need to strip it at all: vfs_create(), vfs_mkdir(),
+vfs_mknod() and dentry_create() go through vfs_prepare_mode(), which
+calls mode_strip_umask() with the same current_umask(), and
+nfsd_create_setattr() drops ATTR_MODE afterwards. This also lets
+S_ISGID be stripped before S_IXGRP goes, the order vfs_prepare_mode()
+wants. On tmpfs without POSIX ACLs, a caller outside the directory's
+group creating 02775 under umask 010 used to get 2765 and now gets 0765.
+
+With tmpfs exported, mounted over NFSv4.2, re-exported and mounted
+again, and "setfacl -d -m u::rwx,g::rwx,o::rwx" on the directory, umask
+077 creates files as 0600 and directories as 0700, where 0666 and 0777
+are expected. It passes on 84d2b696236c, the parent of 5aa8fd9cea2e, and
+fails on 5aa8fd9cea2e. With this patch it passes on nfsd-testing
+d692f252c52b, and pynfs reports LOCK24 and CSESS22 as it does without.
+
+Fixes: 5aa8fd9cea2e ("fs: add a new SB_I_NOUMASK flag")
+Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
+---
+ fs/nfsd/nfs4proc.c | 3 ---
+ fs/nfsd/vfs.c      | 3 ---
+ 2 files changed, 6 deletions(-)
+
+diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c
+index 03ea955f1..090518760 100644
+--- a/fs/nfsd/nfs4proc.c
++++ b/fs/nfsd/nfs4proc.c
+@@ -359,9 +359,6 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 			dput(child);
+ 	}
+ 
+-	if (!IS_POSIXACL(d_inode(parent.dentry)))
+-		iap->ia_mode &= ~current_umask();
+-
+ 	/*
+ 	 * For the EXCLUSIVE modes we do our own uniqueness tests
+ 	 * so don't want O_EXCL.
+diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
+index 02df2ff02..c6a71fb84 100644
+--- a/fs/nfsd/vfs.c
++++ b/fs/nfsd/vfs.c
+@@ -2034,9 +2034,6 @@ nfsd_create_locked(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 		iap->ia_mode = 0;
+ 	iap->ia_mode = (iap->ia_mode & S_IALLUGO) | type;
+ 
+-	if (!IS_POSIXACL(dirp))
+-		iap->ia_mode &= ~current_umask();
+-
+ 	err = 0;
+ 	switch (type) {
+ 	case S_IFREG:

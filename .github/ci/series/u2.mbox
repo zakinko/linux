@@ -1,0 +1,43 @@
+From b0474f22860aac72af52f1e50e5ea6a5eed8e172 Mon Sep 17 00:00:00 2001
+From: Showta Ishizaki <zakinko@snowrabbit.org>
+Date: Fri, 6 Nov 2026 12:35:09 +0900
+Subject: [PATCH 2/4] nfsd: drop the umask check from NFSv3 CREATE
+
+The umask of an nfsd thread is 0 except during NFSv4 OPEN and CREATE, so
+this check has nothing to strip.
+
+Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
+---
+ fs/nfsd/nfs3proc.c | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/fs/nfsd/nfs3proc.c b/fs/nfsd/nfs3proc.c
+index 5c00e3c38..722c1fb17 100644
+--- a/fs/nfsd/nfs3proc.c
++++ b/fs/nfsd/nfs3proc.c
+@@ -901,7 +901,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
+ 	struct dentry *parent, *child, *mnt_child;
+ 	struct svc_export *exp;
+ 	__u32 v_mtime, v_atime;
+-	struct inode *inode;
+ 	struct nfsd_attrs nattrs = {
+ 		.na_iattr	= iattrs,
+ 	};
+@@ -935,7 +934,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
+ 		return status;
+ 
+ 	parent = dirfhp->fh_dentry;
+-	inode = d_inode(parent);
+ 
+ 	host_err = fh_want_write(dirfhp);
+ 	if (host_err)
+@@ -1019,9 +1017,6 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *dirfhp,
+ 		goto out;
+ 	}
+ 
+-	if (!IS_POSIXACL(inode))
+-		iattrs->ia_mode &= ~current_umask();
+-
+ 	status = fh_fill_pre_attrs(dirfhp);
+ 	if (status != nfs_ok)
+ 		goto out;

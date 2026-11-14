@@ -18,6 +18,16 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Rebase onto current nfsd-testing
+        run: |
+          cp -r .github /tmp/gh
+          git fetch -q --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/cel/linux.git nfsd-testing
+          test "$(git rev-parse FETCH_HEAD)" = ecb3bfd5595fe459b1101efe09954bcc52d5930e
+          git checkout -q FETCH_HEAD
+          git -c user.name=ci -c user.email=ci@invalid am -q /tmp/gh/ci/series/*.mbox
+          mkdir -p .github && cp -r /tmp/gh/. .github/
+          git log --oneline -5
+
       - name: Install packages
         run: |
           sudo apt-get update -q
