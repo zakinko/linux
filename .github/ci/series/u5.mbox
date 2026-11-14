@@ -1,0 +1,410 @@
+From a6141abd44a26178d27ad6abb4f523d936e15e82 Mon Sep 17 00:00:00 2001
+From: Showta Ishizaki <zakinko@snowrabbit.org>
+Date: Thu, 5 Nov 2026 05:17:48 +0900
+Subject: [PATCH 1/3] fs: add inode operations for NFSv4 ACLs
+
+A filesystem whose ACLs are NFSv4 ACLs has no way to hand them to an
+in-kernel user.  The only route is the system.nfs4_acl xattr, whose value
+is the XDR of the protocol, and a kernel user would have to parse it.
+POSIX ACLs left that shape behind for ->get_acl and ->set_acl.  Do the same
+here with struct nfs4_acl, which moves to a header of its own so that a
+filesystem need not take in the protocol definitions.
+
+A principal is a uid, a gid, a special identifier or a string.  The string
+is for a principal with no local id: replacing it with nobody would change
+what the ACL says.
+
+SB_I_NFS4ACL says the filesystem has an acl attribute, SB_I_NFS41ACL that it
+has dacl and sacl as well.  For NFS this depends on the server, so the
+operations alone cannot say it.
+
+LSMs are asked about the xattr that presents the same object, so that a
+policy does not depend on the route taken.  The set side expects the inode
+lock held because nfsd_setattr() holds it.
+
+Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
+---
+ Documentation/filesystems/locking.rst |   2 +
+ Documentation/filesystems/vfs.rst     |  17 ++++
+ fs/xattr.c                            | 110 ++++++++++++++++++++++++++
+ include/linux/fs.h                    |  15 ++++
+ include/linux/fs/super_types.h        |   2 +
+ include/linux/nfs4.h                  |  24 +-----
+ include/linux/nfs4_acl.h              |  55 +++++++++++++
+ include/linux/nfs_xdr.h               |   7 --
+ include/linux/xattr.h                 |  13 +++
+ 9 files changed, 215 insertions(+), 30 deletions(-)
+ create mode 100644 include/linux/nfs4_acl.h
+
+diff --git a/Documentation/filesystems/locking.rst b/Documentation/filesystems/locking.rst
+index f7363ad77..3dcd5dfc2 100644
+--- a/Documentation/filesystems/locking.rst
++++ b/Documentation/filesystems/locking.rst
+@@ -115,6 +115,8 @@ setattr:	exclusive
+ permission:	no (may not block if called in rcu-walk mode)
+ get_inode_acl:	no
+ get_acl:	no
++get_nfs4_acl:	no
++set_nfs4_acl:	exclusive
+ getattr:	no
+ listxattr:	no
+ fiemap:		no
+diff --git a/Documentation/filesystems/vfs.rst b/Documentation/filesystems/vfs.rst
+index 1824462a4..fe10265a4 100644
+--- a/Documentation/filesystems/vfs.rst
++++ b/Documentation/filesystems/vfs.rst
+@@ -441,6 +441,8 @@ As of kernel 2.6.22, the following members are defined:
+ 		int (*tmpfile) (const struct mnt_idmap *, struct inode *, struct file *, umode_t);
+ 		struct posix_acl * (*get_acl)(const struct mnt_idmap *, struct dentry *, int);
+ 	        int (*set_acl)(const struct mnt_idmap *, struct dentry *, struct posix_acl *, int);
++		struct nfs4_acl *(*get_nfs4_acl)(const struct mnt_idmap *, struct dentry *, enum nfs4_acl_type);
++		int (*set_nfs4_acl)(const struct mnt_idmap *, struct dentry *, enum nfs4_acl_type, const struct nfs4_acl *);
+ 		int (*fileattr_set)(const struct mnt_idmap *idmap,
+ 				    struct dentry *dentry, struct file_kattr *fa);
+ 		int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
+@@ -634,6 +636,21 @@ otherwise noted.
+         filesystem must define this operation to use
+         simple_offset_dir_operations.
+ 
++``get_nfs4_acl``
++	called by the VFS to get an NFSv4 ACL of an inode, on a filesystem
++	that sets SB_I_NFS4ACL.  The type is NFS4ACL_ACL, or NFS4ACL_DACL or
++	NFS4ACL_SACL where it also sets SB_I_NFS41ACL.  The ids in the result
++	are the filesystem's, as for get_acl.  The result comes from kmalloc(),
++	and any who_str in it lives in the same allocation.
++
++``set_nfs4_acl``
++	called by the VFS to set an NFSv4 ACL, with the inode locked.  The VFS
++	has already translated the ids from the mount's idmapping into the
++	filesystem's, as for set_acl.  Who may do so is the filesystem's
++	decision.  The filesystem keeps the mode and
++	the ACL consistent: RFC 8881 6.4.1.1 and 6.4.1.2 say how.
++
++
+ The Address Space Object
+ ========================
+ 
+diff --git a/fs/xattr.c b/fs/xattr.c
+index 0705801a6..527a67960 100644
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -13,6 +13,7 @@
+ #include <linux/slab.h>
+ #include <linux/file.h>
+ #include <linux/xattr.h>
++#include <linux/nfs4.h>
+ #include <linux/mount.h>
+ #include <linux/namei.h>
+ #include <linux/security.h>
+@@ -357,6 +358,115 @@ retry_deleg:
+ }
+ EXPORT_SYMBOL_GPL(vfs_setxattr);
+ 
++static const char *nfs4_acl_xattr_name(struct inode *inode,
++				       enum nfs4_acl_type type)
++{
++	if (!IS_NFS4ACL(inode))
++		return NULL;
++	switch (type) {
++	case NFS4ACL_ACL:
++		return XATTR_NAME_NFSV4_ACL;
++	case NFS4ACL_DACL:
++		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_DACL : NULL;
++	case NFS4ACL_SACL:
++		return IS_NFS41ACL(inode) ? XATTR_NAME_NFSV4_SACL : NULL;
++	default:
++		return NULL;
++	}
++}
++
++/**
++ * vfs_get_nfs4_acl - get an NFSv4 ACL of an inode
++ * @idmap: idmap of the mount
++ * @dentry: the dentry of the inode
++ * @type: acl, dacl or sacl
++ *
++ * The ACL is the one system.nfs4_acl presents, so LSMs are asked about that
++ * attribute.  As with vfs_get_acl(), the ids are the filesystem's, and a
++ * caller on an idmapped mount maps them with make_vfsuid() and
++ * make_vfsgid().  The caller must kfree() the result.
++ *
++ * Return: the ACL, or an ERR_PTR.
++ */
++struct nfs4_acl *vfs_get_nfs4_acl(const struct mnt_idmap *idmap,
++				  struct dentry *dentry,
++				  enum nfs4_acl_type type)
++{
++	struct inode *inode = d_inode(dentry);
++	const char *name = nfs4_acl_xattr_name(inode, type);
++	int error;
++
++	if (!name)
++		return ERR_PTR(-EOPNOTSUPP);
++	error = security_inode_getxattr(dentry, name);
++	if (error)
++		return ERR_PTR(error);
++	return inode->i_op->get_nfs4_acl(idmap, dentry, type);
++}
++EXPORT_SYMBOL_GPL(vfs_get_nfs4_acl);
++
++/*
++ * Translate the ids of @acl from the mount's idmapping into the filesystem's,
++ * as vfs_set_acl_idmapped_mnt() does for POSIX ACLs.
++ */
++static void vfs_set_nfs4_acl_idmapped_mnt(const struct mnt_idmap *idmap,
++					  struct user_namespace *fs_userns,
++					  struct nfs4_acl *acl)
++{
++	for (u32 i = 0; i < acl->naces; i++) {
++		struct nfs4_ace *ace = &acl->aces[i];
++
++		if (ace->whotype != NFS4_ACL_WHO_NAMED)
++			continue;
++		if (ace->flag & NFS4_ACE_IDENTIFIER_GROUP)
++			ace->who_gid = from_vfsgid(idmap, fs_userns,
++						   VFSGIDT_INIT(ace->who_gid));
++		else
++			ace->who_uid = from_vfsuid(idmap, fs_userns,
++						   VFSUIDT_INIT(ace->who_uid));
++	}
++}
++
++/**
++ * vfs_set_nfs4_acl_locked - set an NFSv4 ACL of an inode
++ * @idmap: idmap of the mount
++ * @dentry: the dentry of the inode
++ * @type: acl, dacl or sacl
++ * @acl: the ACL to set, with ids as seen through @idmap
++ *
++ * The ids of @acl are translated in place into the filesystem's, as
++ * vfs_set_acl() does.  The caller holds the inode lock.  Who may set the ACL
++ * is the filesystem's decision: the ACL itself can grant it to someone other
++ * than the owner.
++ *
++ * Return: 0 or a negative errno.
++ */
++int vfs_set_nfs4_acl_locked(const struct mnt_idmap *idmap,
++			    struct dentry *dentry, enum nfs4_acl_type type,
++			    struct nfs4_acl *acl)
++{
++	struct inode *inode = d_inode(dentry);
++	const char *name = nfs4_acl_xattr_name(inode, type);
++	int error;
++
++	if (!name)
++		return -EOPNOTSUPP;
++	error = may_write_xattr(idmap, inode);
++	if (error)
++		return error;
++	error = security_inode_setxattr(idmap, dentry, name, NULL, 0, 0);
++	if (error)
++		return error;
++	vfs_set_nfs4_acl_idmapped_mnt(idmap, i_user_ns(inode), acl);
++	error = inode->i_op->set_nfs4_acl(idmap, dentry, type, acl);
++	if (error)
++		return error;
++	fsnotify_xattr(dentry);
++	security_inode_post_setxattr(dentry, name, NULL, 0, 0);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(vfs_set_nfs4_acl_locked);
++
+ static ssize_t
+ xattr_getsecurity(const struct mnt_idmap *idmap, struct inode *inode,
+ 		  const char *name, void *value, size_t size)
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 99caef43f..7723a37a5 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -52,6 +52,8 @@
+ #include <uapi/linux/fs.h>
+ 
+ struct bdi_writeback;
++enum nfs4_acl_type;
++struct nfs4_acl;
+ struct bio;
+ struct io_comp_batch;
+ struct fiemap_extent_info;
+@@ -2036,6 +2038,10 @@ struct inode_operations {
+ 				     int);
+ 	int (*set_acl)(const struct mnt_idmap *, struct dentry *,
+ 		       struct posix_acl *, int);
++	struct nfs4_acl *(*get_nfs4_acl)(const struct mnt_idmap *,
++					 struct dentry *, enum nfs4_acl_type);
++	int (*set_nfs4_acl)(const struct mnt_idmap *, struct dentry *,
++			    enum nfs4_acl_type, const struct nfs4_acl *);
+ 	int (*fileattr_set)(const struct mnt_idmap *idmap,
+ 			    struct dentry *dentry, struct file_kattr *fa);
+ 	int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
+@@ -2157,6 +2163,15 @@ extern loff_t vfs_dedupe_file_range_one(struct file *src_file, loff_t src_pos,
+ #define IS_POSIXACL(inode)	0
+ #endif
+ 
++/*
++ * The flag says the filesystem can, the operation says this inode can: an
++ * NFSv4 symlink has neither ACL nor operation.
++ */
++#define IS_NFS4ACL(inode)	(((inode)->i_sb->s_iflags & SB_I_NFS4ACL) && \
++				 (inode)->i_op->get_nfs4_acl)
++#define IS_NFS41ACL(inode)	(IS_NFS4ACL(inode) && \
++				 ((inode)->i_sb->s_iflags & SB_I_NFS41ACL))
++
+ #define IS_DEADDIR(inode)	((inode)->i_flags & S_DEAD)
+ #define IS_NOCMTIME(inode)	((inode)->i_flags & S_NOCMTIME)
+ 
+diff --git a/include/linux/fs/super_types.h b/include/linux/fs/super_types.h
+index 72f4288e1..b3206b17b 100644
+--- a/include/linux/fs/super_types.h
++++ b/include/linux/fs/super_types.h
+@@ -359,5 +359,7 @@ struct super_block {
+ #define SB_I_NOIDMAP	0x00002000	/* No idmapped mounts on this superblock */
+ #define SB_I_ALLOW_HSM	0x00004000	/* Allow HSM events on this superblock */
+ #define SB_I_NO_DATA_INTEGRITY	0x00008000 /* fs cannot guarantee data persistence on sync */
++#define SB_I_NFS4ACL	0x00010000	/* inodes have NFSv4 ACLs */
++#define SB_I_NFS41ACL	0x00020000	/* ... and a dacl and a sacl */
+ 
+ #endif /* _LINUX_FS_SUPER_TYPES_H */
+diff --git a/include/linux/nfs4.h b/include/linux/nfs4.h
+index 41b7cdcc6..d01e769b6 100644
+--- a/include/linux/nfs4.h
++++ b/include/linux/nfs4.h
+@@ -16,32 +16,10 @@
+ #include <linux/list.h>
+ #include <linux/uidgid.h>
+ #include <uapi/linux/nfs4.h>
++#include <linux/nfs4_acl.h>
+ #include <linux/sunrpc/msg_prot.h>
+ #include <linux/sunrpc/xdrgen/nfs4_1.h>
+ 
+-enum nfs4_acl_whotype {
+-	NFS4_ACL_WHO_NAMED = 0,
+-	NFS4_ACL_WHO_OWNER,
+-	NFS4_ACL_WHO_GROUP,
+-	NFS4_ACL_WHO_EVERYONE,
+-};
+-
+-struct nfs4_ace {
+-	uint32_t	type;
+-	uint32_t	flag;
+-	uint32_t	access_mask;
+-	int		whotype;
+-	union {
+-		kuid_t	who_uid;
+-		kgid_t	who_gid;
+-	};
+-};
+-
+-struct nfs4_acl {
+-	uint32_t	naces;
+-	struct nfs4_ace	aces[];
+-};
+-
+ #define NFS4_MAXLABELLEN	2048
+ 
+ struct nfs4_label {
+diff --git a/include/linux/nfs4_acl.h b/include/linux/nfs4_acl.h
+new file mode 100644
+index 000000000..34b954096
+--- /dev/null
++++ b/include/linux/nfs4_acl.h
+@@ -0,0 +1,55 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * An NFSv4 ACL as the VFS sees it.  Filesystems include this without what
++ * linux/nfs4.h brings in for the protocol.
++ */
++#ifndef _LINUX_NFS4_ACL_H
++#define _LINUX_NFS4_ACL_H
++
++#include <linux/types.h>
++#include <linux/uidgid.h>
++
++enum nfs4_acl_whotype {
++	NFS4_ACL_WHO_NAMED = 0,
++	NFS4_ACL_WHO_OWNER,
++	NFS4_ACL_WHO_GROUP,
++	NFS4_ACL_WHO_EVERYONE,
++	NFS4_ACL_WHO_STRING,	/* a principal with no local id */
++};
++
++enum nfs4_acl_type {
++	NFS4ACL_NONE = 0,
++	NFS4ACL_ACL,
++	NFS4ACL_DACL,
++	NFS4ACL_SACL,
++};
++
++/* RFC 8881 6.4.3.2: the flag of a dacl or sacl */
++#define NFS4_ACL_AUTO_INHERIT	0x00000001
++#define NFS4_ACL_PROTECTED	0x00000002
++#define NFS4_ACL_DEFAULTED	0x00000004
++#define NFS4_ACL_FLAGS		(NFS4_ACL_AUTO_INHERIT | NFS4_ACL_PROTECTED | \
++				 NFS4_ACL_DEFAULTED)
++
++struct nfs4_ace {
++	uint32_t	type;
++	uint32_t	flag;
++	uint32_t	access_mask;
++	int		whotype;
++	union {
++		kuid_t	who_uid;
++		kgid_t	who_gid;
++		struct {
++			const char	*who_str;
++			u32		who_strlen;
++		};
++	};
++};
++
++struct nfs4_acl {
++	uint32_t	flag;		/* dacl and sacl only */
++	uint32_t	naces;
++	struct nfs4_ace	aces[];
++};
++
++#endif /* _LINUX_NFS4_ACL_H */
+diff --git a/include/linux/nfs_xdr.h b/include/linux/nfs_xdr.h
+index c0e29b4df..163f0d36c 100644
+--- a/include/linux/nfs_xdr.h
++++ b/include/linux/nfs_xdr.h
+@@ -835,13 +835,6 @@ struct nfs_setattrargs {
+ 	const struct nfs4_label		*label;
+ };
+ 
+-enum nfs4_acl_type {
+-	NFS4ACL_NONE = 0,
+-	NFS4ACL_ACL,
+-	NFS4ACL_DACL,
+-	NFS4ACL_SACL,
+-};
+-
+ struct nfs_setaclargs {
+ 	struct nfs4_sequence_args	seq_args;
+ 	struct nfs_fh *			fh;
+diff --git a/include/linux/xattr.h b/include/linux/xattr.h
+index 4cc4257de..66eeeabe5 100644
+--- a/include/linux/xattr.h
++++ b/include/linux/xattr.h
+@@ -76,6 +76,19 @@ struct xattr {
+ 	size_t value_len;
+ };
+ 
++#define XATTR_NAME_NFSV4_ACL "system.nfs4_acl"
++#define XATTR_NAME_NFSV4_DACL "system.nfs4_dacl"
++#define XATTR_NAME_NFSV4_SACL "system.nfs4_sacl"
++
++enum nfs4_acl_type;
++struct nfs4_acl;
++struct nfs4_acl *vfs_get_nfs4_acl(const struct mnt_idmap *idmap,
++				  struct dentry *dentry,
++				  enum nfs4_acl_type type);
++int vfs_set_nfs4_acl_locked(const struct mnt_idmap *idmap,
++			    struct dentry *dentry, enum nfs4_acl_type type,
++			    struct nfs4_acl *acl);
++
+ ssize_t __vfs_getxattr(struct dentry *, struct inode *, const char *, void *, size_t);
+ ssize_t vfs_getxattr(const struct mnt_idmap *, struct dentry *, const char *,
+ 		     void *, size_t);
+-- 
+2.54.0 (Apple Git-157)
+

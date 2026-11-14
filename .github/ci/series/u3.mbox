@@ -1,0 +1,43 @@
+From d4855589107d2fa7ff8cfea19ee85fdb4013ce8b Mon Sep 17 00:00:00 2001
+From: Showta Ishizaki <zakinko@snowrabbit.org>
+Date: Fri, 6 Nov 2026 12:35:09 +0900
+Subject: [PATCH 3/4] nfsd: return NFS4ERR_INVAL for a bad mode_umask
+
+RFC 8275 section 5 requires NFS4ERR_INVAL when mu_umask has bits set
+other than the low nine, and when mode_umask appears in an operation
+other than CREATE or OPEN. nfsd masks the extra bits off and creates the
+object, and answers SETATTR with NFS4ERR_BADXDR.
+
+With pynfs taught mode_umask and run over NFSv4.2 against nfsd-testing
+d692f252c52b, OPEN and CREATE with mu_umask 01022 returned NFS4_OK and
+SETATTR NFS4ERR_BADXDR; all three now return NFS4ERR_INVAL. The rest of
+pynfs 4.0 and 4.1 gives the same results as without the change.
+
+Fixes: 47057abde515 ("nfsd: add support for the umask attribute")
+Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
+---
+ fs/nfsd/nfs4xdr.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index 90b44163f..858b24d29 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -642,13 +642,15 @@ nfsd4_decode_fattr4(struct nfsd4_compoundargs *argp, u32 *bmval, u32 bmlen,
+ 		u32 mode, mask;
+ 
+ 		if (!umask)
+-			return nfserr_bad_xdr;
++			return nfserr_inval;
+ 		if (xdr_stream_decode_u32(argp->xdr, &mode) < 0)
+ 			return nfserr_bad_xdr;
+ 		iattr->ia_mode = mode & (S_IFMT | S_IALLUGO);
+ 		if (xdr_stream_decode_u32(argp->xdr, &mask) < 0)
+ 			return nfserr_bad_xdr;
+-		*umask = mask & S_IRWXUGO;
++		if (mask & ~S_IRWXUGO)
++			return nfserr_inval;
++		*umask = mask;
+ 		iattr->ia_valid |= ATTR_MODE;
+ 	}
+ 	if (bmval[2] & FATTR4_WORD2_TIME_DELEG_ACCESS) {

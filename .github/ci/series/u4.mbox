@@ -1,0 +1,87 @@
+From 47303df2dd4e56d66a1a4d5d81f38dc894bda925 Mon Sep 17 00:00:00 2001
+From: Showta Ishizaki <zakinko@snowrabbit.org>
+Date: Fri, 6 Nov 2026 12:35:09 +0900
+Subject: [PATCH 4/4] nfsd: treat mode_umask as a write-only attribute
+
+mode_umask is set-only, so RFC 8881 section 5.5 requires NFS4ERR_INVAL
+from an attempt to get it, and RFC 8275 section 5 requires the same from
+VERIFY and NVERIFY. nfsd only checks word 1 for write-only attributes.
+GETATTR and READDIR therefore succeed, and VERIFY and NVERIFY compare
+against an attribute with no value.
+
+The encoder has nothing to put in the reply for this attribute, but the
+returned attrmask still carries its bit. A client that decodes by that
+mask runs off the end of the attribute list.
+
+With pynfs taught mode_umask and run over NFSv4.2 against nfsd-testing
+d692f252c52b, GETATTR left pynfs with EOFError, READDIR and NVERIFY
+returned NFS4_OK, and VERIFY NFS4ERR_NOT_SAME; all four now return
+NFS4ERR_INVAL. The rest of pynfs 4.0 and 4.1 gives the same results as
+without the change.
+
+Fixes: 47057abde515 ("nfsd: add support for the umask attribute")
+Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
+---
+ fs/nfsd/attr4.h    | 1 +
+ fs/nfsd/nfs4proc.c | 9 ++++++---
+ fs/nfsd/nfs4xdr.c  | 1 +
+ 3 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/fs/nfsd/attr4.h b/fs/nfsd/attr4.h
+index f0b51f805..6d0960f26 100644
+--- a/fs/nfsd/attr4.h
++++ b/fs/nfsd/attr4.h
+@@ -91,6 +91,7 @@
+ /* These will return ERR_INVAL if specified in GETATTR or READDIR. */
+ #define NFSD_WRITEONLY_ATTRS_WORD1 \
+ 	(FATTR4_WORD1_TIME_ACCESS_SET   | FATTR4_WORD1_TIME_MODIFY_SET)
++#define NFSD_WRITEONLY_ATTRS_WORD2	FATTR4_WORD2_MODE_UMASK
+ 
+ /*
+  * These are the only attrs allowed in CREATE/OPEN/SETATTR. Don't add
+diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c
+index 090518760..42ee06ed5 100644
+--- a/fs/nfsd/nfs4proc.c
++++ b/fs/nfsd/nfs4proc.c
+@@ -1060,7 +1060,8 @@ nfsd4_getattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+ 	if (status)
+ 		return status;
+ 
+-	if (getattr->ga_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
++	if ((getattr->ga_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1) ||
++	    (getattr->ga_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
+ 		return nfserr_inval;
+ 
+ 	getattr->ga_bmval[0] &= nfsd_suppattrs[cstate->minorversion][0];
+@@ -1199,7 +1200,8 @@ nfsd4_readdir(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+ 
+ 	/* no need to check permission - this will be done in nfsd_readdir() */
+ 
+-	if (readdir->rd_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
++	if ((readdir->rd_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1) ||
++	    (readdir->rd_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
+ 		return nfserr_inval;
+ 
+ 	readdir->rd_bmval[0] &= nfsd_suppattrs[cstate->minorversion][0];
+@@ -2739,7 +2741,8 @@ _nfsd4_verify(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+ 		return status;
+ 
+ 	if ((verify->ve_bmval[0] & FATTR4_WORD0_RDATTR_ERROR)
+-	    || (verify->ve_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1))
++	    || (verify->ve_bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1)
++	    || (verify->ve_bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2))
+ 		return nfserr_inval;
+ 	if (verify->ve_attrlen & 3)
+ 		return nfserr_inval;
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index 858b24d29..49e886d41 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -4052,6 +4052,7 @@ nfsd4_encode_fattr4(struct svc_rqst *rqstp, struct xdr_stream *xdr,
+ 	};
+ 
+ 	WARN_ON_ONCE(bmval[1] & NFSD_WRITEONLY_ATTRS_WORD1);
++	WARN_ON_ONCE(bmval[2] & NFSD_WRITEONLY_ATTRS_WORD2);
+ 	WARN_ON_ONCE(!nfsd_attrs_supported(minorversion, bmval));
+ 
+ 	args.rqstp = rqstp;
