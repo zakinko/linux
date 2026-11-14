@@ -1,8 +1,7 @@
-From af07d8cae02634031ef4b009303430e3a1f9389b Mon Sep 17 00:00:00 2001
+From c2276eb4ff96e00611709da9fa86b100b0d093ea Mon Sep 17 00:00:00 2001
 From: Showta Ishizaki <zakinko@snowrabbit.org>
 Date: Thu, 5 Nov 2026 05:17:48 +0900
-Subject: [PATCH 3/3] nfsd: pass NFSv4 ACLs through on filesystems that have
- them
+Subject: [PATCH] nfsd: pass NFSv4 ACLs through on filesystems that have them
 
 nfsd knows only POSIX ACLs, and an NFSv4 client mount has none.  On a
 re-export the ACL attribute is therefore reported as unsupported, although
@@ -33,7 +32,7 @@ Signed-off-by: Showta Ishizaki <zakinko@snowrabbit.org>
  8 files changed, 270 insertions(+), 28 deletions(-)
 
 diff --git a/fs/nfsd/acl.h b/fs/nfsd/acl.h
-index 2003523d0..47ff191ed 100644
+index 2003523..47ff191 100644
 --- a/fs/nfsd/acl.h
 +++ b/fs/nfsd/acl.h
 @@ -47,8 +47,16 @@ __be32 nfs4_acl_write_who(struct xdr_stream *xdr, int who);
@@ -56,7 +55,7 @@ index 2003523d0..47ff191ed 100644
  
  #endif /* LINUX_NFS4_ACL_H */
 diff --git a/fs/nfsd/attr4.h b/fs/nfsd/attr4.h
-index 6d0960f26..6a91b902c 100644
+index 6d0960f..6a91b90 100644
 --- a/fs/nfsd/attr4.h
 +++ b/fs/nfsd/attr4.h
 @@ -54,7 +54,8 @@
@@ -79,7 +78,7 @@ index 6d0960f26..6a91b902c 100644
  #define MAYBE_FATTR4_WORD2_SECURITY_LABEL \
  	FATTR4_WORD2_SECURITY_LABEL
 diff --git a/fs/nfsd/nfs4acl.c b/fs/nfsd/nfs4acl.c
-index 94f6ad381..c0b5f383a 100644
+index 94f6ad3..c0b5f38 100644
 --- a/fs/nfsd/nfs4acl.c
 +++ b/fs/nfsd/nfs4acl.c
 @@ -41,6 +41,8 @@
@@ -180,7 +179,7 @@ index 94f6ad381..c0b5f383a 100644
  ace2type(struct nfs4_ace *ace)
  {
 diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c
-index 42ee06ed5..2be38d515 100644
+index f28fb8a..c0b97ad 100644
 --- a/fs/nfsd/nfs4proc.c
 +++ b/fs/nfsd/nfs4proc.c
 @@ -145,8 +145,16 @@ check_attr_support(struct nfsd4_compound_state *cstate, u32 *bmval,
@@ -201,7 +200,7 @@ index 42ee06ed5..2be38d515 100644
  	if ((bmval[2] & (FATTR4_WORD2_POSIX_DEFAULT_ACL |
  					FATTR4_WORD2_POSIX_ACCESS_ACL)) &&
  					!IS_POSIXACL(d_inode(dentry)))
-@@ -384,14 +392,17 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
+@@ -402,14 +410,17 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
  			/* Cannot specify both NFSv4 and Posix ACLs */
  			return nfserr_inval;
  		}
@@ -219,9 +218,9 @@ index 42ee06ed5..2be38d515 100644
 +	if (status)
 +		return status;
  
- 	v_mtime = 0;
- 	v_atime = 0;
-@@ -505,6 +516,10 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 	if (nfsd4_create_is_exclusive(open->op_createmode)) {
+ 		u32 *verifier = (u32 *)open->op_verf.data;
+@@ -521,6 +532,10 @@ nfsd4_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
  		open->op_bmval[2] &= ~FATTR4_WORD2_POSIX_DEFAULT_ACL;
  	if (attrs.na_paclerr)
  		open->op_bmval[2] &= ~FATTR4_WORD2_POSIX_ACCESS_ACL;
@@ -232,7 +231,7 @@ index 42ee06ed5..2be38d515 100644
  out:
  	nfsd_attrs_free(&attrs);
  	return status;
-@@ -967,11 +982,15 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+@@ -990,11 +1005,15 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
  			status = nfserr_inval;
  			goto out_aftermask;
  		}
@@ -250,7 +249,7 @@ index 42ee06ed5..2be38d515 100644
  	current->fs->umask = create->cr_umask;
  	switch (create->cr_type) {
  	case NF4LNK:
-@@ -1036,6 +1055,10 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+@@ -1059,6 +1078,10 @@ nfsd4_create(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
  		create->cr_bmval[2] &= ~FATTR4_WORD2_POSIX_DEFAULT_ACL;
  	if (attrs.na_paclerr)
  		create->cr_bmval[2] &= ~FATTR4_WORD2_POSIX_ACCESS_ACL;
@@ -261,7 +260,7 @@ index 42ee06ed5..2be38d515 100644
  	set_change_info(&create->cr_cinfo, &cstate->current_fh);
  	fh_dup2(&cstate->current_fh, &resfh);
  out:
-@@ -1433,9 +1456,12 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+@@ -1456,9 +1479,12 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
  	}
  
  	inode = cstate->current_fh.fh_dentry->d_inode;
@@ -275,7 +274,7 @@ index 42ee06ed5..2be38d515 100644
  	if (status)
  		goto out;
  	save_no_wcc = cstate->current_fh.fh_no_wcc;
-@@ -1448,6 +1474,10 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
+@@ -1471,6 +1497,10 @@ nfsd4_setattr(struct svc_rqst *rqstp, struct nfsd4_compound_state *cstate,
  		status = nfserrno(attrs.na_dpaclerr);
  	if (!status)
  		status = nfserrno(attrs.na_paclerr);
@@ -286,7 +285,7 @@ index 42ee06ed5..2be38d515 100644
  out:
  	fh_drop_write(&cstate->current_fh);
  out_err:
-@@ -3645,6 +3675,8 @@ static u32 nfsd4_getattr_rsize(const struct svc_rqst *rqstp,
+@@ -3672,6 +3702,8 @@ static u32 nfsd4_getattr_rsize(const struct svc_rqst *rqstp,
  
  	if (bmap0 & FATTR4_WORD0_ACL)
  		return nfsd4_max_payload(rqstp);
@@ -296,7 +295,7 @@ index 42ee06ed5..2be38d515 100644
  		return nfsd4_max_payload(rqstp);
  
 diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
-index 49e886d41..f640f64e6 100644
+index 0476aaf..52ea09a 100644
 --- a/fs/nfsd/nfs4xdr.c
 +++ b/fs/nfsd/nfs4xdr.c
 @@ -310,21 +310,38 @@ nfsd4_decode_nfsace4(struct nfsd4_compoundargs *argp, struct nfs4_ace *ace)
@@ -614,7 +613,7 @@ index 49e886d41..f640f64e6 100644
  		fh_put(tempfh);
  		kfree(tempfh);
 diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
-index c6a71fb84..cabb79835 100644
+index 241c485..1fc279b 100644
 --- a/fs/nfsd/vfs.c
 +++ b/fs/nfsd/vfs.c
 @@ -678,6 +678,18 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
@@ -637,7 +636,7 @@ index c6a71fb84..cabb79835 100644
  	/*
  	 * RFC 1813 Section 3.3.2 does not mandate that an NFS server
 diff --git a/fs/nfsd/vfs.h b/fs/nfsd/vfs.h
-index 73ab9d34a..11a0a59b7 100644
+index 40115d9..5416b4d 100644
 --- a/fs/nfsd/vfs.h
 +++ b/fs/nfsd/vfs.h
 @@ -102,10 +102,15 @@ struct nfsd_attrs {
@@ -667,7 +666,7 @@ index 73ab9d34a..11a0a59b7 100644
  
  struct nfsd_net;
 diff --git a/fs/nfsd/xdr4.h b/fs/nfsd/xdr4.h
-index ecab2249e..c838ae79d 100644
+index 9c31e91..2a4c1be 100644
 --- a/fs/nfsd/xdr4.h
 +++ b/fs/nfsd/xdr4.h
 @@ -120,6 +120,8 @@ struct nfsd4_create {
